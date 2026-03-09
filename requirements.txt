@@ -1,0 +1,5 @@
+django>=5.0
+django-extensions
+django-cors-headers
+gunicorn
+whitenoise

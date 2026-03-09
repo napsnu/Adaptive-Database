@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (local only — Railway will have its own)
+db.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Environment variables
+.env
+
+# Documentation / PDFs
+*.pdf
+pdf_content.txt
