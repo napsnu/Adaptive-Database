@@ -142,6 +142,11 @@ class AdaptiveEngine:
             is_correct, score, feedback, selected_option = self._auto_grade(
                 question, selected_option_label, response_text, response_data
             )
+        elif question.skill.code == 'speaking' and response_text.strip():
+            # Speaking with transcribed speech (from Web Speech API)
+            is_correct, score, feedback, selected_option = self._grade_speaking(
+                question, response_text, max_score
+            )
         else:
             # Subjective: use manual_score if provided, else treat as 0
             if manual_score is not None:
@@ -414,6 +419,62 @@ class AdaptiveEngine:
 
         score = max_score * (correct_count / total)
         return False, round(score, 2), f'{correct_count}/{total} items correct', None
+
+    def _grade_speaking(self, question, response_text, max_score):
+        """
+        Grade a speaking question using the transcribed speech text.
+
+        - read_aloud: Compare transcription to the expected passage (text similarity)
+        - describe_picture / opinion: Check minimum word count and give a participation score
+        """
+        qtype_code = question.question_type.code
+        spoken_text = response_text.strip()
+
+        if not spoken_text:
+            return False, 0.0, 'No speech detected. Please try speaking again.', None
+
+        if qtype_code == 'read_aloud':
+            # Compare spoken text to the expected passage text
+            expected = question.content_text or question.question_text or ''
+            similarity = self._text_similarity(spoken_text, expected)
+
+            if similarity >= 0.8:
+                return True, max_score, f'Excellent reading! ({similarity:.0%} accuracy)', None
+            elif similarity >= 0.5:
+                score = max_score * similarity
+                return True, round(score, 2), f'Good attempt ({similarity:.0%} accuracy). Keep practicing pronunciation.', None
+            else:
+                score = max_score * similarity
+                return False, round(score, 2), f'Try to read the passage more carefully ({similarity:.0%} accuracy).', None
+
+        else:
+            # describe_picture, opinion_essay — grade by word count & effort
+            word_count = len(spoken_text.split())
+
+            # Minimum word thresholds per CEFR level
+            level_order = question.cefr_level.order  # 1=A1, 6=C2
+            min_words = 5 + (level_order * 5)  # A1=10, A2=15, B1=20, B2=25, C1=30, C2=35
+
+            if word_count >= min_words:
+                score = max_score * 0.8  # Good effort = 80%
+                return True, round(score, 2), f'Good response! ({word_count} words spoken)', None
+            elif word_count >= min_words * 0.5:
+                score = max_score * 0.5
+                return False, round(score, 2), f'Try to speak more ({word_count}/{min_words} words minimum)', None
+            else:
+                score = max_score * 0.2
+                return False, round(score, 2), f'Response too short ({word_count} words). Try to elaborate more.', None
+
+    @staticmethod
+    def _text_similarity(text1, text2):
+        """Simple word-overlap similarity score (0.0 to 1.0)."""
+        import re
+        words1 = set(re.findall(r'[a-z]+', text1.lower()))
+        words2 = set(re.findall(r'[a-z]+', text2.lower()))
+        if not words2:
+            return 0.0
+        overlap = words1 & words2
+        return len(overlap) / len(words2)
 
     def _get_next_level_up(self):
         try:
