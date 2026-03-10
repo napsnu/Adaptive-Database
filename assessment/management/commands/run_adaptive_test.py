@@ -148,14 +148,19 @@ class Command(BaseCommand):
             return engine.submit_answer(question, response_text=text)
 
         elif fmt in ('long_text', 'audio'):
-            self.stdout.write('  (Type your response, or press Enter to skip)')
-            text = input('  > ').strip()
-            self.stdout.write('  Rate your response (0.0 to 1.0, e.g. 0.7 for 70%):')
-            try:
-                score = float(input('  Score: ').strip())
-            except ValueError:
-                score = 0.5
-            return engine.submit_answer(question, response_text=text, manual_score=score)
+            if question.skill.code == 'speaking':
+                self.stdout.write('  🎤 SPEAKING QUESTION — Type what you would say out loud:')
+                text = input('  > ').strip()
+                return engine.submit_answer(question, response_text=text)
+            else:
+                self.stdout.write('  (Type your response, or press Enter to skip)')
+                text = input('  > ').strip()
+                self.stdout.write('  Rate your response (0.0 to 1.0, e.g. 0.7 for 70%):')
+                try:
+                    score = float(input('  Score: ').strip())
+                except ValueError:
+                    score = 0.5
+                return engine.submit_answer(question, response_text=text, manual_score=score)
 
         elif fmt == 'matching':
             self.stdout.write('  Enter matches (e.g. 1=2,2=3,3=1,4=4):')
@@ -201,9 +206,25 @@ class Command(BaseCommand):
             return engine.submit_answer(question, response_text=text)
 
         elif fmt in ('long_text', 'audio'):
-            score = round(random.uniform(0.3, 0.9), 1)
-            self.stdout.write(f'  [AUTO] Manual score: {score}')
-            return engine.submit_answer(question, response_text='Auto response', manual_score=score)
+            if question.skill.code == 'speaking':
+                # Simulate spoken response - use sample_answer or generate words
+                if question.question_type.code == 'read_aloud' and question.content_text:
+                    # For read-aloud, "speak" the passage text (with some errors)
+                    words = question.content_text.split()
+                    if random.random() < 0.7:
+                        text = question.content_text  # Good reading
+                    else:
+                        text = ' '.join(words[:len(words)//2])  # Partial reading
+                else:
+                    # For opinion/describe, generate some words
+                    word_count = random.randint(10, 40)
+                    text = ' '.join(['sample'] * word_count)
+                self.stdout.write(f'  [AUTO] Spoke: {text[:80]}...')
+                return engine.submit_answer(question, response_text=text)
+            else:
+                score = round(random.uniform(0.3, 0.9), 1)
+                self.stdout.write(f'  [AUTO] Manual score: {score}')
+                return engine.submit_answer(question, response_text='Auto response', manual_score=score)
 
         elif fmt == 'matching':
             pairs = list(question.matching_pairs.all())

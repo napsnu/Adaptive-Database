@@ -18,6 +18,7 @@ Algorithm:
 """
 
 import random
+from django.db import models
 from django.utils import timezone
 from assessment.models import (
     CEFRLevel, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
@@ -104,10 +105,15 @@ class AdaptiveEngine:
         if self.skill:
             qs = qs.filter(skill=self.skill)
 
-        # Prefer auto-gradable questions for adaptive accuracy
-        auto_qs = list(qs.filter(question_type__is_auto_gradable=True))
-        if auto_qs:
-            return random.choice(auto_qs)
+        # Prefer auto-gradable questions for adaptive accuracy,
+        # but also include speaking questions (graded via speech transcription)
+        speaking_skill = Skill.objects.filter(code='speaking').first()
+        gradable_qs = list(qs.filter(
+            models.Q(question_type__is_auto_gradable=True) |
+            models.Q(skill=speaking_skill)
+        ))
+        if gradable_qs:
+            return random.choice(gradable_qs)
 
         all_qs = list(qs)
         if all_qs:
