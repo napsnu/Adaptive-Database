@@ -97,14 +97,20 @@ class Command(BaseCommand):
         self.stdout.write(self.style.MIGRATE_HEADING('-' * 60))
 
     def _display_question(self, num, question, engine):
+        progress = engine.get_progress()
         self.stdout.write('')
         self.stdout.write(self.style.MIGRATE_HEADING(f'--- Question {num} ---'))
         self.stdout.write(f'  Level: {question.cefr_level.code} | '
                           f'Skill: {question.skill.name} | '
                           f'Type: {question.question_type.name}')
         self.stdout.write(f'  Topic: {question.topic.name} | '
-                          f'Points: {question.points} | '
-                          f'Adaptive Level: {engine.current_level.code}')
+                          f'Points: {question.points}')
+        # Show hierarchical progress
+        passed = ', '.join(progress['skills_passed']) if progress['skills_passed'] else 'none'
+        self.stdout.write(f'  Current Skill: {progress["current_skill"]} '
+                          f'(Q {progress["questions_in_skill"] + 1}/{progress["questions_per_skill"]}) | '
+                          f'Attempt: {progress["current_skill_attempt"]}/{progress["max_attempts"]}')
+        self.stdout.write(f'  Skills Passed: {passed}')
         self.stdout.write('')
 
         if question.content_text:
@@ -256,22 +262,32 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f'  >>> INCORRECT. {result["feedback"][:100]}'))
 
         action = result['action']
-        if action == 'LEVEL UP':
+        skill_status = result.get('skill_status')
+
+        if action == 'SKILL_PASSED' and skill_status:
             self.stdout.write(self.style.SUCCESS(
-                f'  ↑↑ LEVEL UP: {result["previous_level"]} → {result["current_level"]}'
+                f'  ★ {skill_status["message"]}'
             ))
-        elif action == 'LEVEL DOWN':
+            if skill_status.get('next_skill'):
+                self.stdout.write(self.style.SUCCESS(
+                    f'  → Next skill: {skill_status["next_skill"].title()}'
+                ))
+            else:
+                self.stdout.write(self.style.SUCCESS(
+                    f'  ★★ All skills complete for this level!'
+                ))
+        elif action == 'SKILL_FAILED_RETRY' and skill_status:
             self.stdout.write(self.style.WARNING(
-                f'  ↓↓ LEVEL DOWN: {result["previous_level"]} → {result["current_level"]}'
+                f'  ✗ {skill_status["message"]}'
             ))
-        elif 'CONVERGE' in action:
-            self.stdout.write(self.style.MIGRATE_HEADING(
-                f'  ◆ {action} at {result["current_level"]}'
+        elif action == 'SKILL_FAILED_MAX_RETRIES' and skill_status:
+            self.stdout.write(self.style.ERROR(
+                f'  ✗ {skill_status["message"]}'
             ))
         else:
             self.stdout.write(
-                f'  Batch: {result["batch_progress"]} | '
-                f'Level: {result["current_level"]} | '
+                f'  Progress: {result["skill_progress"]} | '
+                f'Skill: {result["current_skill"]} | '
                 f'Total: {result["total_correct"]}/{result["total_questions"]} correct'
             )
 
@@ -282,15 +298,30 @@ class Command(BaseCommand):
         self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))
         self.stdout.write(f'  Session       : {result["session_id"][:8]}...')
         self.stdout.write(f'  Candidate     : {result["candidate"]}')
-        self.stdout.write(f'  Skill Focus   : {result["skill_focus"]}')
-        self.stdout.write(f'  Starting Level: {result["starting_level"]}')
+        self.stdout.write(f'  Level         : {result["level"]}')
+        level_status = 'PASSED' if result['level_passed'] else 'NOT PASSED'
         self.stdout.write(self.style.SUCCESS(
-            f'  FINAL LEVEL   : {result["final_level"]}'
+            f'  Level Status  : {level_status}'
         ))
+        if result.get('next_level'):
+            self.stdout.write(self.style.SUCCESS(
+                f'  Next Level    : {result["next_level"]} UNLOCKED!'
+            ))
         self.stdout.write(f'  Questions     : {result["total_questions"]}')
         self.stdout.write(f'  Correct       : {result["total_correct"]}')
         self.stdout.write(f'  Score         : {result["total_score"]}/{result["max_possible_score"]}')
         self.stdout.write(f'  Percentage    : {result["percentage"]}%')
+
+        # Skill breakdown
+        self.stdout.write('')
+        self.stdout.write('  Skill Results:')
+        for skill_code, info in result.get('skill_results', {}).items():
+            status = 'PASSED' if info['passed'] else 'FAILED'
+            scores = ', '.join(info['scores']) if info['scores'] else 'N/A'
+            style = self.style.SUCCESS if info['passed'] else self.style.ERROR
+            self.stdout.write(style(
+                f'    {skill_code.title():12s} : {status} (Attempts: {info["attempts"]}, Scores: {scores})'
+            ))
 
         self.stdout.write('')
         self.stdout.write('  Question-by-question:')
@@ -299,6 +330,6 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'    [{mark}] {h["question_id"]:20s} | '
                 f'+{h["score"]:.0f}/{h["max_score"]:.0f} | '
-                f'Level: {h["current_level"]} | {h["action"]}'
+                f'Skill: {h.get("current_skill", "?")} | {h["action"]}'
             )
         self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))

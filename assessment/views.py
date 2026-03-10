@@ -208,12 +208,14 @@ class StartSessionView(View):
         session = engine.start_session()
         _active_engines[str(session.id)] = engine
 
+        progress = engine.get_progress()
         return JsonResponse({
             'session_id': str(session.id),
             'candidate': candidate.name,
             'starting_level': level,
             'skill': skill_code or 'all',
             'session_type': session_type,
+            'progress': progress,
         })
 
 
@@ -224,12 +226,23 @@ class NextQuestionView(View):
             return _json_error('Session not found or expired', 404)
 
         if engine.is_finished():
-            return JsonResponse({'finished': True, 'message': 'Session complete'})
+            progress = engine.get_progress()
+            return JsonResponse({
+                'finished': True,
+                'message': 'Session complete',
+                'progress': progress,
+            })
 
         question = engine.get_next_question()
         if not question:
-            return JsonResponse({'finished': True, 'message': 'No more questions available'})
+            progress = engine.get_progress()
+            return JsonResponse({
+                'finished': True,
+                'message': 'No more questions available',
+                'progress': progress,
+            })
 
+        progress = engine.get_progress()
         data = {
             'finished': False,
             'question_id': question.question_id,
@@ -245,11 +258,7 @@ class NextQuestionView(View):
             'points': question.points,
             'time_limit': question.time_limit_seconds,
             'response_format': question.question_type.response_format,
-            'progress': {
-                'current_level': engine.current_level.code,
-                'questions_answered': engine.total_questions,
-                'max_questions': engine.MAX_QUESTIONS,
-            },
+            'progress': progress,
         }
 
         fmt = question.question_type.response_format
