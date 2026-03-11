@@ -13,6 +13,7 @@ Endpoints:
   GET  /api/session/<id>/next/         — Get next question
   POST /api/session/<id>/answer/       — Submit answer
   GET  /api/session/<id>/results/      — Get session results
+  POST /api/tts/                       — Generate TTS audio from text
 """
 
 import json
@@ -27,6 +28,7 @@ from .models import (
     Candidate, AssessmentSession, Response, SkillScore,
 )
 from .adaptive_engine import AdaptiveEngine
+from .ai_services import generate_tts_audio
 
 
 def _json_error(msg, status=400):
@@ -64,6 +66,7 @@ class DashboardView(View):
                 'GET /api/session/<id>/next/',
                 'POST /api/session/<id>/answer/',
                 'GET /api/session/<id>/results/',
+                'POST /api/tts/',
             ],
         })
 
@@ -261,6 +264,39 @@ class NextQuestionView(View):
             'progress': progress,
         }
 
+        skill_code = question.skill.code
+        # For listening questions: generate TTS audio, hide the transcript
+        if skill_code == 'listening':
+            tts_text = question.content_text or question.question_text
+            # Strip "[Audio transcript]" prefix for clean TTS
+            import re
+            tts_text = re.sub(r'^\[Audio[^\]]*\]\s*', '', tts_text, flags=re.IGNORECASE)
+            audio_b64 = generate_tts_audio(tts_text)
+            if audio_b64:
+                data['audio_base64'] = audio_b64
+                data['audio_format'] = 'mp3'
+            # Always send tts_text so frontend can use browser TTS as fallback
+            data['tts_text'] = tts_text
+            # Don't send the raw transcript — candidate must listen
+            data['content'] = None
+            data['has_audio'] = True
+
+        # For speaking read-aloud: generate TTS of the passage so candidate
+        # can hear the correct pronunciation first (optional playback)
+        elif skill_code == 'speaking' and question.question_type.code == 'read_aloud':
+            tts_text = question.content_text or question.question_text
+            audio_b64 = generate_tts_audio(tts_text)
+            if audio_b64:
+                data['audio_base64'] = audio_b64
+                data['audio_format'] = 'mp3'
+            data['tts_text'] = tts_text
+            data['has_audio'] = True
+            data['requires_microphone'] = True
+
+        # For other speaking questions: needs microphone, no TTS
+        elif skill_code == 'speaking':
+            data['requires_microphone'] = True
+
         fmt = question.question_type.response_format
         if fmt in ('single_choice', 'true_false'):
             data['options'] = list(question.options.values('label', 'text', 'order'))
@@ -350,3 +386,29 @@ class SessionResultsView(View):
                 } for r in responses],
             }
         })
+
+
+# ── TTS Endpoint ─────────────────────────────────────────────────────
+
+@method_decorator(csrf_exempt, name='dispatch')
+class TTSView(View):
+    def post(self, request):
+        data = _parse_json(request)
+        if not data:
+            return _json_error('Invalid JSON body')
+
+        text = data.get('text', '').strip()
+        if not text:
+            return _json_error('text is required')
+
+        if len(text) > 2000:
+            return _json_error('Text too long (max 2000 characters)')
+
+        audio_b64 = generate_tts_audio(text)
+        if audio_b64:
+            return JsonResponse({
+                'audio_base64': audio_b64,
+                'audio_format': 'mp3',
+            })
+        else:
+            return _json_error('TTS generation failed. Service may be temporarily unavailable.', 503)

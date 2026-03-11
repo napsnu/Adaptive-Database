@@ -266,23 +266,23 @@ class Command(BaseCommand):
 
         if action == 'SKILL_PASSED' and skill_status:
             self.stdout.write(self.style.SUCCESS(
-                f'  ★ {skill_status["message"]}'
+                f'  [PASSED] {skill_status["message"]}'
             ))
             if skill_status.get('next_skill'):
                 self.stdout.write(self.style.SUCCESS(
-                    f'  → Next skill: {skill_status["next_skill"].title()}'
+                    f'  -> Next skill: {skill_status["next_skill"].title()}'
                 ))
             else:
                 self.stdout.write(self.style.SUCCESS(
-                    f'  ★★ All skills complete for this level!'
+                    f'  ** All skills complete for this level!'
                 ))
         elif action == 'SKILL_FAILED_RETRY' and skill_status:
             self.stdout.write(self.style.WARNING(
-                f'  ✗ {skill_status["message"]}'
+                f'  [RETRY] {skill_status["message"]}'
             ))
         elif action == 'SKILL_FAILED_MAX_RETRIES' and skill_status:
             self.stdout.write(self.style.ERROR(
-                f'  ✗ {skill_status["message"]}'
+                f'  [FAILED] {skill_status["message"]}'
             ))
         else:
             self.stdout.write(

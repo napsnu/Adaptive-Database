@@ -3,3 +3,6 @@ django-extensions
 django-cors-headers
 gunicorn
 whitenoise
+python-dotenv
+huggingface-hub
+google-generativeai

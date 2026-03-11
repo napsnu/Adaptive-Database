@@ -22,6 +22,7 @@ from assessment.models import (
     CEFRLevel, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
     Candidate, AssessmentSession, Response, SkillScore,
 )
+from assessment.ai_services import grade_with_gemini
 
 
 # Skill order for hierarchical progression
@@ -161,7 +162,7 @@ class AdaptiveEngine:
             is_correct, score, feedback, selected_option = self._auto_grade(
                 question, selected_option_label, response_text, response_data
             )
-        elif question.skill.code == 'speaking' and response_text.strip():
+        elif question.skill.code in ('speaking', 'listening') and response_text.strip():
             is_correct, score, feedback, selected_option = self._grade_speaking(
                 question, response_text, max_score
             )
@@ -498,10 +499,10 @@ class AdaptiveEngine:
 
     def _grade_speaking(self, question, response_text, max_score):
         """
-        Grade a speaking question using the transcribed speech text.
+        Grade a speaking question using AI (Gemini) with basic fallback.
 
-        - read_aloud: Compare transcription to the expected passage (text similarity)
-        - describe_picture / opinion: Check minimum word count and give a participation score
+        - Sends the transcribed speech to Gemini for CEFR-level grading
+        - Falls back to text similarity / word count if Gemini unavailable
         """
         qtype_code = question.question_type.code
         spoken_text = response_text.strip()
@@ -509,6 +510,27 @@ class AdaptiveEngine:
         if not spoken_text:
             return False, 0.0, 'No speech detected. Please try speaking again.', None
 
+        # Try Gemini AI grading first
+        expected = question.content_text or question.question_text or ''
+        gemini_result = grade_with_gemini(
+            question_text=question.question_text,
+            response_text=spoken_text,
+            skill_code='speaking',
+            question_type_code=qtype_code,
+            cefr_level=question.cefr_level.code,
+            max_score=max_score,
+            expected_text=expected if qtype_code == 'read_aloud' else None,
+        )
+
+        if gemini_result is not None:
+            is_correct, score, feedback = gemini_result
+            return is_correct, score, feedback, None
+
+        # Fallback: basic grading if Gemini is unavailable
+        return self._basic_grade_speaking(question, spoken_text, max_score, qtype_code)
+
+    def _basic_grade_speaking(self, question, spoken_text, max_score, qtype_code):
+        """Fallback basic speaking grading without AI."""
         if qtype_code == 'read_aloud':
             # Compare spoken text to the expected passage text
             expected = question.content_text or question.question_text or ''

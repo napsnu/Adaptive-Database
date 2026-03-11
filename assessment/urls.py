@@ -15,4 +15,5 @@ urlpatterns = [
     path('session/<str:session_id>/next/', views.NextQuestionView.as_view(), name='next-question'),
     path('session/<str:session_id>/answer/', views.SubmitAnswerView.as_view(), name='submit-answer'),
     path('session/<str:session_id>/results/', views.SessionResultsView.as_view(), name='session-results'),
+    path('tts/', views.TTSView.as_view(), name='tts'),
 ]
