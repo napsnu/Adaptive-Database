@@ -13,6 +13,8 @@ Endpoints:
   GET  /api/session/<id>/next/         — Get next question
   POST /api/session/<id>/answer/       — Submit answer
   GET  /api/session/<id>/results/      — Get session results
+  GET  /api/session/resume/?email=     — Check for incomplete session
+  GET  /api/admin/analytics/           — Admin analytics dashboard
   POST /api/tts/                       — Generate TTS audio from text
 """
 
@@ -66,6 +68,9 @@ class DashboardView(View):
                 'GET /api/session/<id>/next/',
                 'POST /api/session/<id>/answer/',
                 'GET /api/session/<id>/results/',
+                'GET /api/session/resume/?email=user@example.com',
+                'GET /api/admin/analytics/',
+                'GET /api/admin/analytics/?email=user@example.com',
                 'POST /api/tts/',
             ],
         })
@@ -384,8 +389,241 @@ class SessionResultsView(View):
                     'score': r.score,
                     'feedback': r.feedback,
                 } for r in responses],
+                'level_passed': session.percentage >= 80.0,
+                'next_level': (
+                    CEFRLevel.objects.filter(order=session.final_level.order + 1).first().code
+                    if session.final_level and session.percentage >= 80.0
+                    and CEFRLevel.objects.filter(order=session.final_level.order + 1).exists()
+                    else None
+                ),
+                'pass_threshold': 80.0,
             }
         })
+
+
+# ── Admin Analytics Endpoint ─────────────────────────────────────────
+
+class AdminAnalyticsView(View):
+    """Detailed analytics for admin: all candidates, their sessions, performance, and question analysis."""
+
+    def get(self, request):
+        from django.db.models import Count, Avg, Q, F
+
+        # Optional filter by candidate email
+        candidate_email = request.GET.get('email')
+
+        # Platform-wide stats
+        total_candidates = Candidate.objects.count()
+        total_sessions = AssessmentSession.objects.count()
+        total_questions = Question.objects.filter(is_active=True).count()
+
+        # Average pass rate (sessions with >= 80% score)
+        completed_sessions = AssessmentSession.objects.filter(is_completed=True)
+        total_completed = completed_sessions.count()
+        passed_sessions = 0
+        if total_completed > 0:
+            for s in completed_sessions:
+                if s.percentage >= 80.0:
+                    passed_sessions += 1
+        avg_pass_rate = round((passed_sessions / total_completed) * 100, 1) if total_completed > 0 else 0
+
+        # Most difficult questions (highest failure rate)
+        difficult_questions = []
+        question_stats = (
+            Response.objects.values('question__question_id', 'question__title', 'question__skill__code')
+            .annotate(
+                total_attempts=Count('id'),
+                failures=Count('id', filter=Q(is_correct=False)),
+            )
+            .filter(total_attempts__gte=2)
+            .order_by('-failures')[:10]
+        )
+        for qs in question_stats:
+            failure_rate = round((qs['failures'] / qs['total_attempts']) * 100, 1) if qs['total_attempts'] > 0 else 0
+            difficult_questions.append({
+                'question_id': qs['question__question_id'],
+                'title': qs['question__title'],
+                'skill': qs['question__skill__code'],
+                'total_attempts': qs['total_attempts'],
+                'failures': qs['failures'],
+                'failure_rate': failure_rate,
+            })
+
+        # Skill-wise average performance
+        skill_performance = []
+        for skill in Skill.objects.all().order_by('order'):
+            skill_scores_qs = SkillScore.objects.filter(skill=skill)
+            if skill_scores_qs.exists():
+                avg_pct = skill_scores_qs.aggregate(avg=Avg('percentage'))['avg'] or 0
+                skill_performance.append({
+                    'skill': skill.name,
+                    'skill_code': skill.code,
+                    'average_percentage': round(avg_pct, 1),
+                    'total_assessments': skill_scores_qs.count(),
+                })
+
+        # Per-candidate data
+        candidates_data = []
+        candidates_qs = Candidate.objects.all().order_by('name')
+        if candidate_email:
+            candidates_qs = candidates_qs.filter(email=candidate_email)
+
+        for candidate in candidates_qs:
+            sessions = AssessmentSession.objects.filter(candidate=candidate).order_by('-started_at')
+            session_count = sessions.count()
+            completed = sessions.filter(is_completed=True)
+
+            # Overall performance
+            overall_pct = 0
+            if completed.exists():
+                total_score = sum(s.total_score for s in completed)
+                total_max = sum(s.max_possible_score for s in completed)
+                overall_pct = round((total_score / total_max) * 100, 1) if total_max > 0 else 0
+
+            # Per-skill breakdown
+            skill_breakdown = []
+            for skill in Skill.objects.all().order_by('order'):
+                ss = SkillScore.objects.filter(session__candidate=candidate, skill=skill)
+                if ss.exists():
+                    avg = ss.aggregate(avg=Avg('percentage'))['avg'] or 0
+                    passed_count = sum(1 for s in ss if s.percentage >= 66.7)  # 2/3 threshold
+                    skill_breakdown.append({
+                        'skill': skill.name,
+                        'skill_code': skill.code,
+                        'average_percentage': round(avg, 1),
+                        'assessments': ss.count(),
+                        'passed': passed_count,
+                    })
+
+            # Most failed questions for this candidate
+            failed_qs = (
+                Response.objects.filter(candidate=candidate, is_correct=False)
+                .values('question__question_id', 'question__title', 'question__skill__code')
+                .annotate(fail_count=Count('id'))
+                .order_by('-fail_count')[:5]
+            )
+            most_failed = [{
+                'question_id': fq['question__question_id'],
+                'title': fq['question__title'],
+                'skill': fq['question__skill__code'],
+                'fail_count': fq['fail_count'],
+            } for fq in failed_qs]
+
+            # Best performing questions
+            best_qs = (
+                Response.objects.filter(candidate=candidate, is_correct=True)
+                .values('question__question_id', 'question__title', 'question__skill__code')
+                .annotate(correct_count=Count('id'))
+                .order_by('-correct_count')[:5]
+            )
+            best_performing = [{
+                'question_id': bq['question__question_id'],
+                'title': bq['question__title'],
+                'skill': bq['question__skill__code'],
+                'correct_count': bq['correct_count'],
+            } for bq in best_qs]
+
+            # Session history
+            session_history = []
+            for s in sessions:
+                session_history.append({
+                    'session_id': str(s.id),
+                    'session_type': s.session_type,
+                    'starting_level': s.starting_level.code if s.starting_level else None,
+                    'final_level': s.final_level.code if s.final_level else None,
+                    'total_questions': s.total_questions,
+                    'correct_answers': s.correct_answers,
+                    'percentage': s.percentage,
+                    'is_completed': s.is_completed,
+                    'level_passed': s.percentage >= 80.0,
+                    'started_at': s.started_at.isoformat() if s.started_at else None,
+                    'ended_at': s.ended_at.isoformat() if s.ended_at else None,
+                })
+
+            candidates_data.append({
+                'name': candidate.name,
+                'email': candidate.email,
+                'current_level': candidate.current_cefr_level.code if candidate.current_cefr_level else 'A1',
+                'total_sessions': session_count,
+                'overall_percentage': overall_pct,
+                'skill_breakdown': skill_breakdown,
+                'most_failed_questions': most_failed,
+                'best_performing_questions': best_performing,
+                'session_history': session_history,
+            })
+
+        return JsonResponse({
+            'platform_stats': {
+                'total_candidates': total_candidates,
+                'total_sessions': total_sessions,
+                'total_questions': total_questions,
+                'completed_sessions': total_completed,
+                'average_pass_rate': avg_pass_rate,
+                'pass_threshold': 80.0,
+            },
+            'difficult_questions': difficult_questions,
+            'skill_performance': skill_performance,
+            'candidates': candidates_data,
+        })
+
+
+# ── Session Resume Endpoint ──────────────────────────────────────────
+
+class SessionResumeView(View):
+    """Check if a candidate has an incomplete session and return its state."""
+
+    def get(self, request):
+        email = request.GET.get('email')
+        if not email:
+            return _json_error('email query parameter is required')
+
+        try:
+            candidate = Candidate.objects.get(email=email)
+        except Candidate.DoesNotExist:
+            return JsonResponse({'has_incomplete_session': False})
+
+        # Find the most recent incomplete session
+        incomplete = (
+            AssessmentSession.objects.filter(candidate=candidate, is_completed=False)
+            .order_by('-started_at')
+            .first()
+        )
+
+        if not incomplete:
+            return JsonResponse({'has_incomplete_session': False})
+
+        session_id = str(incomplete.id)
+        engine = _active_engines.get(session_id)
+
+        # Count answered questions in this session
+        answered_count = Response.objects.filter(session=incomplete).count()
+
+        # Get skill scores so far
+        responses = Response.objects.filter(session=incomplete).select_related('question__skill')
+        skill_progress = {}
+        for r in responses:
+            sk = r.question.skill.code
+            if sk not in skill_progress:
+                skill_progress[sk] = {'total': 0, 'correct': 0}
+            skill_progress[sk]['total'] += 1
+            if r.is_correct:
+                skill_progress[sk]['correct'] += 1
+
+        result = {
+            'has_incomplete_session': True,
+            'session_id': session_id,
+            'session_type': incomplete.session_type,
+            'starting_level': incomplete.starting_level.code if incomplete.starting_level else 'A1',
+            'current_level': incomplete.current_level.code if incomplete.current_level else 'A1',
+            'questions_answered': answered_count,
+            'total_score': incomplete.total_score,
+            'max_possible_score': incomplete.max_possible_score,
+            'started_at': incomplete.started_at.isoformat() if incomplete.started_at else None,
+            'skill_progress': skill_progress,
+            'engine_active': engine is not None,
+        }
+
+        return JsonResponse(result)
 
 
 # ── TTS Endpoint ─────────────────────────────────────────────────────

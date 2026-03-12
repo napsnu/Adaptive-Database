@@ -6,3 +6,4 @@ whitenoise
 python-dotenv
 huggingface-hub
 google-generativeai
+streamlit

@@ -11,7 +11,8 @@ Algorithm:
  - Pass threshold: >= 2/3 correct to pass the skill
  - PASS  → skill marked complete, move to next skill
  - FAIL  → must retry the same skill (different questions if available)
- - All 4 skills passed → level complete, next level unlocked
+ - Overall score >= 80% → level passed, next level unlocked
+ - Overall score < 80% → level not passed, candidate stays at current level
  - Maximum 2 retries per skill (3 attempts total), then forced move to next skill
 """
 
@@ -318,6 +319,8 @@ class AdaptiveEngine:
             'total_correct': self.total_correct,
         }
 
+    LEVEL_PASS_PERCENTAGE = 80.0  # >= 80% overall score to unlock next level
+
     def finish_session(self):
         """Finalize the session and compute skill scores."""
         self.session.final_level = self.current_level
@@ -325,11 +328,19 @@ class AdaptiveEngine:
         self.session.is_completed = True
         self.session.save()
 
-        # Determine if level is passed (all skills passed)
-        all_passed = all(v['passed'] for v in self._skill_results.values())
+        # Compute per-skill scores
+        self._compute_skill_scores()
 
-        # Update candidate's level if all skills passed
-        if all_passed:
+        # Calculate overall percentage
+        pct = 0.0
+        if self.total_max_score > 0:
+            pct = round((self.total_score / self.total_max_score) * 100, 1)
+
+        # Level passes if overall score >= 80%
+        level_passed = pct >= self.LEVEL_PASS_PERCENTAGE
+
+        # Update candidate's level if score >= 80%
+        if level_passed:
             next_level = self._get_next_level_up()
             if next_level:
                 self.candidate.current_cefr_level = next_level
@@ -339,25 +350,19 @@ class AdaptiveEngine:
             self.candidate.current_cefr_level = self.current_level
         self.candidate.save(update_fields=['current_cefr_level'])
 
-        # Compute per-skill scores
-        self._compute_skill_scores()
-
-        pct = 0.0
-        if self.total_max_score > 0:
-            pct = round((self.total_score / self.total_max_score) * 100, 1)
-
         return {
             'session_id': str(self.session.id),
             'candidate': self.candidate.name,
             'session_type': self.session_type,
             'level': self.current_level.code,
-            'level_passed': all_passed,
-            'next_level': self._get_next_level_up().code if all_passed and self._get_next_level_up() else None,
+            'level_passed': level_passed,
+            'next_level': self._get_next_level_up().code if level_passed and self._get_next_level_up() else None,
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
             'total_score': self.total_score,
             'max_possible_score': self.total_max_score,
             'percentage': pct,
+            'pass_threshold': self.LEVEL_PASS_PERCENTAGE,
             'skill_results': {k: {
                 'passed': v['passed'],
                 'attempts': v['attempts'],

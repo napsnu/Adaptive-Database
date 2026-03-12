@@ -2,18 +2,21 @@
 CLI Interactive Adaptive Assessment Demo.
 
 Runs an adaptive CEFR assessment in the terminal.
-Supports all 4 skills and auto-grades objective questions.
+Supports all 4 skills, AI grading (Gemini), and TTS audio (Kokoro).
 
 Usage:
     python manage.py run_adaptive_test --email test@example.com
     python manage.py run_adaptive_test --email test@example.com --skill reading --level B1
     python manage.py run_adaptive_test --email test@example.com --auto
+    python manage.py run_adaptive_test --test-services
+    python manage.py run_adaptive_test --test-services --verbose
 """
 
 import random
 from django.core.management.base import BaseCommand
 from assessment.models import Candidate, CEFRLevel, Skill
 from assessment.adaptive_engine import AdaptiveEngine
+from assessment.ai_services import generate_tts_audio, grade_with_gemini
 
 
 class Command(BaseCommand):
@@ -32,13 +35,22 @@ class Command(BaseCommand):
                             help='Focus on a specific skill (default: all)')
         parser.add_argument('--auto', action='store_true',
                             help='Auto-answer mode for demo purposes')
+        parser.add_argument('--test-services', action='store_true',
+                            help='Test TTS (Kokoro) and AI grading (Gemini) services independently')
+        parser.add_argument('--verbose', action='store_true',
+                            help='Show detailed AI service info (grading source, TTS status, feedback)')
 
     def handle(self, *args, **options):
+        if options['test_services']:
+            self._test_services(verbose=options['verbose'])
+            return
+
         email = options['email']
         name = options['name']
         level = options['level']
         skill = options['skill']
         auto = options['auto']
+        self.verbose = options['verbose']
 
         candidate, created = Candidate.objects.get_or_create(
             email=email, defaults={'name': name}
@@ -114,7 +126,36 @@ class Command(BaseCommand):
         self.stdout.write('')
 
         if question.content_text:
-            self.stdout.write(self.style.HTTP_NOT_MODIFIED(f'  {question.content_text}'))
+            # For listening: note that this would be audio in the real app
+            if question.skill.code == 'listening':
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [LISTENING] In the app, this text is played as audio (TTS).'
+                ))
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [LISTENING] The transcript is hidden - candidate must listen.'
+                ))
+                if self.verbose:
+                    self.stdout.write(self.style.HTTP_NOT_MODIFIED(f'  Transcript: {question.content_text}'))
+            else:
+                self.stdout.write(self.style.HTTP_NOT_MODIFIED(f'  {question.content_text}'))
+            self.stdout.write('')
+
+        # For speaking: note microphone requirement
+        if question.skill.code == 'speaking':
+            if question.question_type.code == 'read_aloud':
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [SPEAKING] Read-aloud: candidate speaks into microphone.'
+                ))
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [SPEAKING] AI (Gemini) grades pronunciation & accuracy.'
+                ))
+            else:
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [SPEAKING] Candidate speaks freely into microphone.'
+                ))
+                self.stdout.write(self.style.HTTP_INFO(
+                    '  [SPEAKING] AI (Gemini) grades vocabulary, grammar, fluency.'
+                ))
             self.stdout.write('')
 
         self.stdout.write(f'  QUESTION: {question.question_text}')
@@ -261,6 +302,10 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.ERROR(f'  >>> INCORRECT. {result["feedback"][:100]}'))
 
+        # Show AI feedback details in verbose mode
+        if self.verbose and result.get('feedback'):
+            self.stdout.write(f'  Feedback: {result["feedback"]}')
+
         action = result['action']
         skill_status = result.get('skill_status')
 
@@ -332,4 +377,209 @@ class Command(BaseCommand):
                 f'+{h["score"]:.0f}/{h["max_score"]:.0f} | '
                 f'Skill: {h.get("current_skill", "?")} | {h["action"]}'
             )
+        self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))
+
+    # ── Independent Service Tests ────────────────────────────────────
+
+    def _test_services(self, verbose=False):
+        """Test TTS and Gemini services independently."""
+        from django.conf import settings
+        import time
+
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))
+        self.stdout.write(self.style.MIGRATE_HEADING('  AI SERVICE DIAGNOSTICS'))
+        self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))
+
+        # ── 1. Check API Keys ────────────────────────────────────────
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('  1. API Key Configuration'))
+        self.stdout.write(self.style.MIGRATE_HEADING('  ' + '-' * 40))
+
+        hf_key = settings.HUGGINGFACE_API_KEY
+        gemini_key = settings.GEMINI_API_KEY
+
+        if hf_key:
+            masked = hf_key[:6] + '...' + hf_key[-4:]
+            self.stdout.write(self.style.SUCCESS(f'  HUGGINGFACE_API_KEY: Set ({masked})'))
+        else:
+            self.stdout.write(self.style.ERROR('  HUGGINGFACE_API_KEY: NOT SET'))
+
+        if gemini_key:
+            masked = gemini_key[:6] + '...' + gemini_key[-4:]
+            self.stdout.write(self.style.SUCCESS(f'  GEMINI_API_KEY:      Set ({masked})'))
+        else:
+            self.stdout.write(self.style.ERROR('  GEMINI_API_KEY:      NOT SET'))
+
+        # ── 2. Test TTS (Kokoro-82M via HuggingFace) ────────────────
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('  2. TTS Service (HuggingFace Kokoro-82M)'))
+        self.stdout.write(self.style.MIGRATE_HEADING('  ' + '-' * 40))
+
+        test_text = "Hello, this is a test of the text to speech system."
+        self.stdout.write(f'  Test text: "{test_text}"')
+        self.stdout.write('  Generating audio...')
+
+        start = time.time()
+        audio_b64 = generate_tts_audio(test_text)
+        elapsed = time.time() - start
+
+        if audio_b64:
+            audio_size = len(audio_b64)
+            self.stdout.write(self.style.SUCCESS(
+                f'  TTS: OK ({elapsed:.1f}s, {audio_size} chars base64, '
+                f'~{audio_size * 3 // 4 // 1024} KB audio)'
+            ))
+            if verbose:
+                self.stdout.write(f'  Base64 preview: {audio_b64[:80]}...')
+        else:
+            self.stdout.write(self.style.ERROR(
+                f'  TTS: FAILED ({elapsed:.1f}s) - Check HuggingFace API key & permissions'
+            ))
+            self.stdout.write(self.style.WARNING(
+                '  Tip: Enable "Make calls to Inference Providers" at '
+                'huggingface.co/settings/tokens'
+            ))
+            self.stdout.write(self.style.WARNING(
+                '  Fallback: Browser SpeechSynthesis API will be used on the frontend'
+            ))
+
+        # ── 3. Test Gemini AI Grading ────────────────────────────────
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('  3. Gemini AI Grading (gemini-2.0-flash)'))
+        self.stdout.write(self.style.MIGRATE_HEADING('  ' + '-' * 40))
+
+        # Test 3a: Speaking - Read Aloud
+        self.stdout.write('')
+        self.stdout.write('  Test 3a: Speaking (read_aloud) grading')
+        expected_passage = "Tom lives in a small house near the park."
+        spoken_text = "Tom lives in a small house near the park."
+        self.stdout.write(f'  Expected: "{expected_passage}"')
+        self.stdout.write(f'  Spoken:   "{spoken_text}"')
+        self.stdout.write('  Grading...')
+
+        start = time.time()
+        result_3a = grade_with_gemini(
+            question_text="Read this passage aloud.",
+            response_text=spoken_text,
+            skill_code='speaking',
+            question_type_code='read_aloud',
+            cefr_level='A1',
+            max_score=2.0,
+            expected_text=expected_passage,
+        )
+        elapsed = time.time() - start
+
+        if result_3a:
+            is_correct, score, feedback = result_3a
+            status = 'CORRECT' if is_correct else 'INCORRECT'
+            self.stdout.write(self.style.SUCCESS(
+                f'  Gemini: OK ({elapsed:.1f}s) -> {status}, Score: {score}/2.0'
+            ))
+            self.stdout.write(f'  Feedback: {feedback}')
+        else:
+            self.stdout.write(self.style.ERROR(
+                f'  Gemini: FAILED ({elapsed:.1f}s) - Check API key or rate limits'
+            ))
+            self.stdout.write(self.style.WARNING(
+                '  Fallback: Basic text-similarity grading will be used'
+            ))
+
+        # Test 3b: Speaking - Opinion (imperfect response)
+        self.stdout.write('')
+        self.stdout.write('  Test 3b: Speaking (opinion) grading')
+        opinion_text = "I think dogs is very good pets because they are friendly and loyal."
+        self.stdout.write(f'  Question: "What is your favorite pet and why?"')
+        self.stdout.write(f'  Response: "{opinion_text}"')
+        self.stdout.write('  Grading...')
+
+        start = time.time()
+        result_3b = grade_with_gemini(
+            question_text="What is your favorite pet and why?",
+            response_text=opinion_text,
+            skill_code='speaking',
+            question_type_code='opinion_essay',
+            cefr_level='A1',
+            max_score=2.0,
+        )
+        elapsed = time.time() - start
+
+        if result_3b:
+            is_correct, score, feedback = result_3b
+            status = 'CORRECT' if is_correct else 'INCORRECT'
+            self.stdout.write(self.style.SUCCESS(
+                f'  Gemini: OK ({elapsed:.1f}s) -> {status}, Score: {score}/2.0'
+            ))
+            self.stdout.write(f'  Feedback: {feedback}')
+        else:
+            self.stdout.write(self.style.ERROR(
+                f'  Gemini: FAILED ({elapsed:.1f}s)'
+            ))
+
+        # Test 3c: Listening comprehension
+        self.stdout.write('')
+        self.stdout.write('  Test 3c: Listening comprehension grading')
+        self.stdout.write(f'  Audio was: "The train to London departs at 3:15 PM from platform 5."')
+        self.stdout.write(f'  Question: "What time does the train leave?"')
+        self.stdout.write(f'  Answer:   "The train leaves at 3:15 PM."')
+        self.stdout.write('  Grading...')
+
+        start = time.time()
+        result_3c = grade_with_gemini(
+            question_text="What time does the train leave?",
+            response_text="The train leaves at 3:15 PM.",
+            skill_code='listening',
+            question_type_code='fill_blank',
+            cefr_level='A1',
+            max_score=2.0,
+            expected_text="The train to London departs at 3:15 PM from platform 5.",
+        )
+        elapsed = time.time() - start
+
+        if result_3c:
+            is_correct, score, feedback = result_3c
+            status = 'CORRECT' if is_correct else 'INCORRECT'
+            self.stdout.write(self.style.SUCCESS(
+                f'  Gemini: OK ({elapsed:.1f}s) -> {status}, Score: {score}/2.0'
+            ))
+            self.stdout.write(f'  Feedback: {feedback}')
+        else:
+            self.stdout.write(self.style.ERROR(
+                f'  Gemini: FAILED ({elapsed:.1f}s)'
+            ))
+
+        # ── Summary ─────────────────────────────────────────────────
+        self.stdout.write('')
+        self.stdout.write(self.style.MIGRATE_HEADING('  ' + '-' * 40))
+        self.stdout.write(self.style.MIGRATE_HEADING('  SUMMARY'))
+        self.stdout.write(self.style.MIGRATE_HEADING('  ' + '-' * 40))
+
+        tts_ok = audio_b64 is not None
+        gemini_ok = result_3a is not None
+        all_ok = tts_ok and gemini_ok
+
+        self.stdout.write(f'  TTS (Kokoro):    {"OK" if tts_ok else "FAILED (browser fallback available)"}')
+        self.stdout.write(f'  Gemini Grading:  {"OK" if gemini_ok else "FAILED (basic fallback available)"}')
+        self.stdout.write('')
+
+        if all_ok:
+            self.stdout.write(self.style.SUCCESS(
+                '  All AI services are working! Full features available.'
+            ))
+        elif gemini_ok:
+            self.stdout.write(self.style.WARNING(
+                '  Gemini works but TTS failed. Listening will use browser SpeechSynthesis.'
+            ))
+        elif tts_ok:
+            self.stdout.write(self.style.WARNING(
+                '  TTS works but Gemini failed. Speaking/listening grading uses basic fallback.'
+            ))
+        else:
+            self.stdout.write(self.style.ERROR(
+                '  Both services failed. System will use fallbacks for everything.'
+            ))
+            self.stdout.write(self.style.WARNING(
+                '  The assessment still works - all features have built-in fallbacks.'
+            ))
+
         self.stdout.write(self.style.MIGRATE_HEADING('=' * 60))
