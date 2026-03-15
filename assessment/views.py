@@ -25,9 +25,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from .models import (
-    CEFRLevel, Skill, QuestionType, Topic,
+    CEFRLevel, CEFRSubLevel, Skill, QuestionType, Topic,
     Question, QuestionOption, MatchingPair, OrderingItem,
-    Candidate, AssessmentSession, Response, SkillScore,
+    Candidate, AssessmentSession, Response, SkillScore, AnswerSample,
 )
 from .adaptive_engine import AdaptiveEngine
 from .ai_services import generate_tts_audio
@@ -61,8 +61,9 @@ class DashboardView(View):
             },
             'endpoints': [
                 'GET /api/levels/', 'GET /api/skills/',
+                'GET /api/sublevels/?level=A1',
                 'GET /api/question-types/', 'GET /api/topics/',
-                'GET /api/questions/?level=A1&skill=reading',
+                'GET /api/questions/?level=A1&sublevel=A1.1&skill=reading',
                 'GET /api/questions/<question_id>/',
                 'POST /api/session/start/',
                 'GET /api/session/<id>/next/',
@@ -80,6 +81,19 @@ class LevelListView(View):
     def get(self, request):
         levels = list(CEFRLevel.objects.values('code', 'name', 'order', 'description', 'min_score', 'max_score'))
         return JsonResponse({'levels': levels})
+
+
+class SubLevelListView(View):
+    def get(self, request):
+        level = request.GET.get('level')
+        qs = CEFRSubLevel.objects.select_related('cefr_level').filter(is_active=True)
+        if level:
+            qs = qs.filter(cefr_level__code=level)
+        sublevels = list(qs.values(
+            'code', 'title', 'unit_order',
+            'cefr_level__code', 'cefr_level__name',
+        ))
+        return JsonResponse({'sublevels': sublevels, 'count': len(sublevels)})
 
 
 class SkillListView(View):
@@ -115,14 +129,17 @@ class TopicListView(View):
 class QuestionListView(View):
     def get(self, request):
         qs = Question.objects.filter(is_active=True).select_related(
-            'cefr_level', 'skill', 'question_type', 'topic'
+            'cefr_level', 'sublevel', 'skill', 'question_type', 'topic'
         )
         level = request.GET.get('level')
+        sublevel = request.GET.get('sublevel')
         skill = request.GET.get('skill')
         qtype = request.GET.get('type')
         topic = request.GET.get('topic')
         if level:
             qs = qs.filter(cefr_level__code=level)
+        if sublevel:
+            qs = qs.filter(sublevel__code=sublevel)
         if skill:
             qs = qs.filter(skill__code=skill)
         if qtype:
@@ -136,6 +153,7 @@ class QuestionListView(View):
                 'question_id': q.question_id,
                 'title': q.title,
                 'level': q.cefr_level.code,
+                'sublevel': q.sublevel.code if q.sublevel else None,
                 'skill': q.skill.code,
                 'question_type': q.question_type.code,
                 'topic': q.topic.code,
@@ -149,7 +167,7 @@ class QuestionDetailView(View):
     def get(self, request, question_id):
         try:
             q = Question.objects.select_related(
-                'cefr_level', 'skill', 'question_type', 'topic'
+                'cefr_level', 'sublevel', 'skill', 'question_type', 'topic'
             ).get(question_id=question_id)
         except Question.DoesNotExist:
             return _json_error('Question not found', 404)
@@ -157,6 +175,7 @@ class QuestionDetailView(View):
         data = {
             'question_id': q.question_id, 'title': q.title,
             'level': q.cefr_level.code, 'skill': q.skill.code,
+            'sublevel': q.sublevel.code if q.sublevel else None,
             'question_type': q.question_type.code, 'topic': q.topic.code,
             'instruction': q.instruction_text, 'content': q.content_text,
             'question': q.question_text,
@@ -176,6 +195,11 @@ class QuestionDetailView(View):
             import random
             random.shuffle(items)
             data['items'] = items
+
+        if q.skill.code == 'writing':
+            data['answer_samples'] = list(
+                q.answer_samples.values('text', 'keywords', 'order')
+            )
 
         return JsonResponse(data)
 
@@ -198,6 +222,7 @@ class StartSessionView(View):
 
         name = data.get('name', 'Learner')
         level = data.get('starting_level', 'A1')
+        sublevel_code = data.get('starting_sublevel')
         skill_code = data.get('skill')
         session_type = data.get('session_type', 'practice')
 
@@ -208,7 +233,8 @@ class StartSessionView(View):
         try:
             engine = AdaptiveEngine(
                 candidate, starting_level_code=level,
-                skill_code=skill_code, session_type=session_type
+                skill_code=skill_code, session_type=session_type,
+                starting_sublevel_code=sublevel_code,
             )
         except Exception as e:
             return _json_error(str(e))
@@ -221,6 +247,7 @@ class StartSessionView(View):
             'session_id': str(session.id),
             'candidate': candidate.name,
             'starting_level': level,
+            'starting_sublevel': engine.current_sublevel.code if engine.current_sublevel else None,
             'skill': skill_code or 'all',
             'session_type': session_type,
             'progress': progress,
@@ -256,6 +283,7 @@ class NextQuestionView(View):
             'question_id': question.question_id,
             'title': question.title,
             'level': question.cefr_level.code,
+            'sublevel': question.sublevel.code if question.sublevel else None,
             'skill': question.skill.code,
             'question_type': question.question_type.code,
             'instruction': question.instruction_text or question.question_type.instruction_template,
@@ -371,7 +399,9 @@ class SessionResultsView(View):
                 'candidate': session.candidate.name,
                 'session_type': session.session_type,
                 'starting_level': session.starting_level.code if session.starting_level else None,
+                'starting_sublevel': session.starting_sublevel.code if session.starting_sublevel else None,
                 'final_level': session.final_level.code if session.final_level else None,
+                'final_sublevel': session.final_sublevel.code if session.final_sublevel else None,
                 'total_questions': session.total_questions,
                 'correct_answers': session.correct_answers,
                 'percentage': session.percentage,

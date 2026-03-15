@@ -6,18 +6,22 @@ multiple question types per skill and topics that vary by CEFR level.
 
 Models:
  1. CEFRLevel       - A1 through C2 with score thresholds
- 2. Skill           - Reading, Writing, Speaking, Listening
- 3. QuestionType    - MCQ, fill-in-gaps, matching, describe picture, write letter, etc.
- 4. Topic           - Greetings, Travel, Business, etc. (linked to levels)
- 5. Question        - A single question linking level + skill + type + topic
- 6. QuestionOption  - Answer choices for MCQ / True-False questions
- 7. MatchingPair    - Left-Right pairs for matching questions
- 8. OrderingItem    - Items with correct positions for ordering questions
- 9. Candidate       - A learner / student
-10. AssessmentSession - A test or practice session (adaptive or fixed)
-11. Response        - A candidate's answer to one question
-12. SkillScore      - Aggregated score per skill within a session
-13. LevelProgress   - Long-term progress tracker per candidate x skill x level
+ 2. CEFRSubLevel    - Unit-level path inside a CEFR level (e.g., A1.1)
+ 3. Skill           - Reading, Writing, Speaking, Listening
+ 4. QuestionType    - MCQ, fill-in-gaps, matching, describe picture, write letter, etc.
+ 5. Topic           - Greetings, Travel, Business, etc. (linked to levels)
+ 6. Question        - A single question linking level + sublevel + skill + type + topic
+ 7. AnswerSample    - Multiple acceptable writing answers for one question
+ 8. QuestionOption  - Answer choices for MCQ / True-False questions
+ 9. MatchingPair    - Left-Right pairs for matching questions
+10. OrderingItem    - Items with correct positions for ordering questions
+11. Candidate       - A learner / student
+12. AssessmentSession - A test or practice session (adaptive or fixed)
+13. Response        - A candidate's answer to one question
+14. SkillScore      - Aggregated score per skill within a session
+15. UserAttempt     - Per-question attempt log for analytics
+16. UserProgress    - Long-term candidate progress per sublevel x skill
+17. LevelProgress   - Legacy progress tracker per candidate x skill x level
 """
 
 import uuid
@@ -53,6 +57,30 @@ class CEFRLevel(models.Model):
 
     def __str__(self):
         return f"{self.code} - {self.name}"
+
+
+# =====================================================================
+# 2. CEFR SUBLEVELS (UNITS)
+# =====================================================================
+
+class CEFRSubLevel(models.Model):
+    """Unit-level progression inside one CEFR level, e.g. A1.1, A1.2."""
+
+    cefr_level = models.ForeignKey(CEFRLevel, on_delete=models.CASCADE, related_name='sublevels')
+    code = models.CharField(max_length=10, unique=True, help_text="e.g. A1.1, A2.5")
+    unit_order = models.PositiveIntegerField(help_text="Unit number within level")
+    title = models.CharField(max_length=150)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['cefr_level__order', 'unit_order']
+        unique_together = ['cefr_level', 'unit_order']
+        verbose_name = "CEFR Sublevel"
+        verbose_name_plural = "CEFR Sublevels"
+
+    def __str__(self):
+        return self.code
 
 
 # =====================================================================
@@ -126,6 +154,7 @@ class Topic(models.Model):
     code = models.CharField(max_length=50, unique=True)
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    suggested_unit_order = models.PositiveIntegerField(null=True, blank=True)
     cefr_levels = models.ManyToManyField(CEFRLevel, related_name='topics', blank=True)
 
     class Meta:
@@ -153,6 +182,14 @@ class Question(models.Model):
 
     question_id = models.CharField(max_length=30, unique=True, help_text="e.g. A1-READ-MCQ-001")
     cefr_level = models.ForeignKey(CEFRLevel, on_delete=models.CASCADE, related_name='questions')
+    sublevel = models.ForeignKey(
+        CEFRSubLevel,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='questions',
+        help_text="Unit-based CEFR sublevel (e.g., A1.3)",
+    )
     skill = models.ForeignKey(Skill, on_delete=models.CASCADE, related_name='questions')
     question_type = models.ForeignKey(QuestionType, on_delete=models.CASCADE, related_name='questions')
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, related_name='questions')
@@ -184,6 +221,28 @@ class Question(models.Model):
 
     def __str__(self):
         return f"[{self.question_id}] {self.title}"
+
+
+# =====================================================================
+# 7. ANSWER SAMPLES (for writing semantic matching)
+# =====================================================================
+
+class AnswerSample(models.Model):
+    """Multiple acceptable sample answers for writing questions."""
+
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answer_samples')
+    text = models.TextField(help_text="One acceptable answer sample")
+    keywords = models.JSONField(default=list, blank=True, help_text="Optional anchor keywords")
+    weight = models.FloatField(default=1.0)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['order', 'id']
+        verbose_name = "Answer Sample"
+        verbose_name_plural = "Answer Samples"
+
+    def __str__(self):
+        return f"Sample for {self.question.question_id}"
 
 
 # =====================================================================
@@ -252,7 +311,7 @@ class OrderingItem(models.Model):
 
 
 # =====================================================================
-# 9. CANDIDATES
+# 11. CANDIDATES
 # =====================================================================
 
 class Candidate(models.Model):
@@ -263,6 +322,10 @@ class Candidate(models.Model):
     native_language = models.CharField(max_length=100, blank=True)
     current_cefr_level = models.ForeignKey(
         CEFRLevel, on_delete=models.SET_NULL, null=True, blank=True, related_name='candidates'
+    )
+    current_sublevel = models.ForeignKey(
+        CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='candidates',
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -277,7 +340,7 @@ class Candidate(models.Model):
 
 
 # =====================================================================
-# 10. ASSESSMENT SESSIONS
+# 12. ASSESSMENT SESSIONS
 # =====================================================================
 
 class AssessmentSession(models.Model):
@@ -300,11 +363,23 @@ class AssessmentSession(models.Model):
     starting_level = models.ForeignKey(
         CEFRLevel, on_delete=models.SET_NULL, null=True, related_name='sessions_started'
     )
+    starting_sublevel = models.ForeignKey(
+        CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sessions_started',
+    )
     current_level = models.ForeignKey(
         CEFRLevel, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions_current'
     )
+    current_sublevel = models.ForeignKey(
+        CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sessions_current',
+    )
     final_level = models.ForeignKey(
         CEFRLevel, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions_final'
+    )
+    final_sublevel = models.ForeignKey(
+        CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sessions_final',
     )
 
     started_at = models.DateTimeField(auto_now_add=True)
@@ -333,7 +408,7 @@ class AssessmentSession(models.Model):
 
 
 # =====================================================================
-# 11. RESPONSES
+# 13. RESPONSES
 # =====================================================================
 
 class Response(models.Model):
@@ -367,7 +442,67 @@ class Response(models.Model):
 
 
 # =====================================================================
-# 12. SKILL SCORES (aggregated per session)
+# 14. SKILL SCORES (aggregated per session)
+# =====================================================================
+# 15. USER ATTEMPTS
+# =====================================================================
+
+class UserAttempt(models.Model):
+    """Per-question attempt log for analytics and adaptive history."""
+
+    candidate = models.ForeignKey(Candidate, on_delete=models.CASCADE, related_name='user_attempts')
+    session = models.ForeignKey(AssessmentSession, on_delete=models.CASCADE, related_name='user_attempts')
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='user_attempts')
+    skill = models.ForeignKey(Skill, on_delete=models.CASCADE, related_name='user_attempts')
+    cefr_level = models.ForeignKey(CEFRLevel, on_delete=models.CASCADE, related_name='user_attempts')
+    sublevel = models.ForeignKey(
+        CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='user_attempts',
+    )
+
+    submitted_answer = models.TextField(blank=True)
+    is_correct = models.BooleanField(default=False)
+    score = models.FloatField(default=0)
+    max_score = models.FloatField(default=1)
+    attempt_no = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = "User Attempt"
+        verbose_name_plural = "User Attempts"
+
+
+# =====================================================================
+# 16. USER PROGRESS
+# =====================================================================
+
+class UserProgress(models.Model):
+    """Progress state for candidate per CEFR sublevel and skill."""
+
+    candidate = models.ForeignKey(Candidate, on_delete=models.CASCADE, related_name='user_progress')
+    cefr_level = models.ForeignKey(CEFRLevel, on_delete=models.CASCADE, related_name='user_progress')
+    sublevel = models.ForeignKey(CEFRSubLevel, on_delete=models.CASCADE, related_name='user_progress')
+    skill = models.ForeignKey(Skill, on_delete=models.CASCADE, related_name='user_progress')
+
+    questions_answered = models.PositiveIntegerField(default=0)
+    correct_answers = models.PositiveIntegerField(default=0)
+    attempts = models.PositiveIntegerField(default=0)
+    mastery_score = models.FloatField(default=0)
+    is_unlocked = models.BooleanField(default=False)
+    is_completed = models.BooleanField(default=False)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ['candidate', 'sublevel', 'skill']
+        ordering = ['candidate__name', 'cefr_level__order', 'sublevel__unit_order', 'skill__order']
+        verbose_name = "User Progress"
+        verbose_name_plural = "User Progress"
+
+
+# =====================================================================
+# 17. LEVEL PROGRESS (long-term tracking)
+# =====================================================================
 # =====================================================================
 
 class SkillScore(models.Model):

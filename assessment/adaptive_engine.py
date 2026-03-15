@@ -17,17 +17,19 @@ Algorithm:
 """
 
 import random
+import math
 from django.db import models
 from django.utils import timezone
 from assessment.models import (
-    CEFRLevel, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
-    Candidate, AssessmentSession, Response, SkillScore,
+    CEFRLevel, CEFRSubLevel, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
+    Candidate, AssessmentSession, Response, SkillScore, AnswerSample,
+    UserAttempt, UserProgress,
 )
 from assessment.ai_services import grade_with_gemini
 
 
 # Skill order for hierarchical progression
-SKILL_ORDER = ['reading', 'writing', 'speaking', 'listening']
+SKILL_ORDER = ['reading', 'writing', 'listening', 'speaking']
 
 
 class AdaptiveEngine:
@@ -51,15 +53,20 @@ class AdaptiveEngine:
     """
 
     QUESTIONS_PER_SKILL = 3
+    SUBLEVEL_QUESTIONS_PER_SKILL = 1
     PASS_THRESHOLD = 2      # >= 2 correct out of 3 to pass a skill
     MAX_RETRIES = 2         # max retries per skill (3 attempts total)
 
     def __init__(self, candidate, starting_level_code='A1', skill_code=None,
-                 session_type='practice'):
+                 session_type='practice', starting_sublevel_code=None):
         self.candidate = candidate
         self.starting_level = CEFRLevel.objects.get(code=starting_level_code)
         self.current_level = self.starting_level
+        self.current_sublevel = self._resolve_starting_sublevel(starting_sublevel_code)
         self.session_type = session_type
+        self.questions_per_skill = (
+            self.SUBLEVEL_QUESTIONS_PER_SKILL if self.current_sublevel else self.QUESTIONS_PER_SKILL
+        )
 
         # If a specific skill is given, test only that skill
         if skill_code:
@@ -101,6 +108,13 @@ class AdaptiveEngine:
             return Skill.objects.get(code=code)
         return None
 
+    def _resolve_starting_sublevel(self, starting_sublevel_code):
+        if starting_sublevel_code:
+            return CEFRSubLevel.objects.get(code=starting_sublevel_code, cefr_level=self.starting_level)
+        if self.candidate.current_sublevel and self.candidate.current_sublevel.cefr_level_id == self.starting_level.id:
+            return self.candidate.current_sublevel
+        return CEFRSubLevel.objects.filter(cefr_level=self.starting_level, is_active=True).order_by('unit_order').first()
+
     def start_session(self):
         """Create a new AssessmentSession."""
         skill_focus = None
@@ -112,7 +126,9 @@ class AdaptiveEngine:
             session_type=self.session_type,
             skill_focus=skill_focus,
             starting_level=self.starting_level,
+            starting_sublevel=self.current_sublevel,
             current_level=self.current_level,
+            current_sublevel=self.current_sublevel,
         )
         return self.session
 
@@ -135,11 +151,18 @@ class AdaptiveEngine:
 
         skill = Skill.objects.get(code=skill_code)
 
-        qs = Question.objects.filter(
+        base_qs = Question.objects.filter(
             cefr_level=self.current_level,
             skill=skill,
             is_active=True,
         ).exclude(id__in=self.used_question_ids)
+
+        qs = base_qs
+        if self.current_sublevel:
+            qs = qs.filter(sublevel=self.current_sublevel)
+            if not qs.exists():
+                # Backward compatibility for older banks that don't have sublevel assigned yet.
+                qs = base_qs
 
         all_qs = list(qs)
         if all_qs:
@@ -159,7 +182,11 @@ class AdaptiveEngine:
         feedback = ''
         selected_option = None
 
-        if question.question_type.is_auto_gradable:
+        if question.skill.code == 'writing' and response_text.strip():
+            is_correct, score, feedback, selected_option = self._grade_writing_with_samples(
+                question, response_text, max_score
+            )
+        elif question.question_type.is_auto_gradable:
             is_correct, score, feedback, selected_option = self._auto_grade(
                 question, selected_option_label, response_text, response_data
             )
@@ -192,6 +219,44 @@ class AdaptiveEngine:
             feedback=feedback,
         )
 
+        UserAttempt.objects.create(
+            candidate=self.candidate,
+            session=self.session,
+            question=question,
+            skill=question.skill,
+            cefr_level=question.cefr_level,
+            sublevel=question.sublevel,
+            submitted_answer=(response_text or selected_option_label or ''),
+            is_correct=bool(is_correct),
+            score=score,
+            max_score=max_score,
+            attempt_no=self._skill_results[self.current_skill_code]['attempts'] + 1,
+        )
+
+        progress_sublevel = question.sublevel or self.current_sublevel
+        if progress_sublevel:
+            progress_obj, _ = UserProgress.objects.get_or_create(
+                candidate=self.candidate,
+                cefr_level=question.cefr_level,
+                sublevel=progress_sublevel,
+                skill=question.skill,
+                defaults={'is_unlocked': True},
+            )
+            progress_obj.questions_answered += 1
+            if is_correct:
+                progress_obj.correct_answers += 1
+            progress_obj.attempts += 1
+            progress_obj.mastery_score = round(
+                (progress_obj.correct_answers / progress_obj.questions_answered) * 100,
+                1,
+            ) if progress_obj.questions_answered > 0 else 0
+            progress_obj.is_completed = progress_obj.mastery_score >= 80.0
+            progress_obj.last_attempt_at = timezone.now()
+            progress_obj.save(update_fields=[
+                'questions_answered', 'correct_answers', 'attempts',
+                'mastery_score', 'is_completed', 'last_attempt_at',
+            ])
+
         self.used_question_ids.add(question.id)
         self.total_questions += 1
         self.total_score += score
@@ -204,11 +269,11 @@ class AdaptiveEngine:
         if is_correct:
             self._current_skill_correct += 1
 
-        # Evaluate after QUESTIONS_PER_SKILL questions
+        # Evaluate after configured number of questions per skill
         action = 'CONTINUE'
         skill_status = None
 
-        if self._current_skill_count >= self.QUESTIONS_PER_SKILL:
+        if self._current_skill_count >= self.questions_per_skill:
             action, skill_status = self._evaluate_skill()
 
         result = {
@@ -221,46 +286,96 @@ class AdaptiveEngine:
             'current_skill': self.current_skill_code,
             'action': action,
             'skill_status': skill_status,
-            'skill_progress': f"{self._current_skill_count}/{self.QUESTIONS_PER_SKILL}",
+            'skill_progress': f"{self._current_skill_count}/{self.questions_per_skill}",
             'skills_passed': [k for k, v in self._skill_results.items() if v['passed']],
             'skills_remaining': [k for k in self._skill_order[self._current_skill_index:]],
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
+            'current_sublevel': self.current_sublevel.code if self.current_sublevel else None,
         }
         self._history.append(result)
 
         # Update session
         self.session.current_level = self.current_level
+        self.session.current_sublevel = self.current_sublevel
         self.session.total_questions = self.total_questions
         self.session.correct_answers = self.total_correct
         self.session.total_score = self.total_score
         self.session.max_possible_score = self.total_max_score
         self.session.save(update_fields=[
-            'current_level', 'total_questions', 'correct_answers',
+            'current_level', 'current_sublevel', 'total_questions', 'correct_answers',
             'total_score', 'max_possible_score'
         ])
 
         return result
 
+    def _grade_writing_with_samples(self, question, response_text, max_score):
+        """Grade writing using multiple acceptable samples via similarity + keyword overlap."""
+        answer = response_text.strip()
+        if not answer:
+            return False, 0.0, 'No answer provided', None
+
+        samples = list(question.answer_samples.all())
+        # Backward compatible fallback to sample_answer if explicit samples are not seeded yet
+        if not samples and question.sample_answer:
+            pseudo_samples = [s.strip() for s in question.sample_answer.split('|') if s.strip()]
+            for idx, text in enumerate(pseudo_samples):
+                samples.append(AnswerSample(question=question, text=text, keywords=[] , order=idx))
+
+        if not samples:
+            # Last-resort fallback to text-input rule
+            return self._grade_text_input(question, response_text, max_score)
+
+        best_score = 0.0
+        for sample in samples:
+            similarity = self._sequence_similarity(answer, sample.text)
+            keyword_score = self._keyword_overlap(answer, sample.keywords)
+            composite = (similarity * 0.75) + (keyword_score * 0.25)
+            if composite > best_score:
+                best_score = composite
+
+        if best_score >= 0.7:
+            return True, max_score, f'Good writing response ({best_score:.0%} match).', None
+        if best_score >= 0.5:
+            partial = round(max_score * best_score, 2)
+            return False, partial, f'Partially correct writing response ({best_score:.0%} match).', None
+        return False, 0.0, f'Response does not match expected writing patterns ({best_score:.0%} match).', None
+
+    @staticmethod
+    def _sequence_similarity(text1, text2):
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, text1.lower().strip(), text2.lower().strip()).ratio()
+
+    @staticmethod
+    def _keyword_overlap(answer, keywords):
+        if not keywords:
+            return 1.0
+        answer_tokens = set(w.strip('.,!?;:()[]{}').lower() for w in answer.split() if w.strip())
+        kw_tokens = set(str(k).lower() for k in keywords if str(k).strip())
+        if not kw_tokens:
+            return 1.0
+        return len(answer_tokens & kw_tokens) / len(kw_tokens)
+
     def _evaluate_skill(self):
         """Evaluate skill round and decide: pass → next skill, fail → retry."""
         correct = self._current_skill_correct
         skill_code = self.current_skill_code
+        pass_threshold = max(1, math.ceil(self.questions_per_skill * 0.8))
 
         # Record this attempt
         self._skill_results[skill_code]['attempts'] += 1
         self._skill_results[skill_code]['scores'].append(
-            f"{correct}/{self.QUESTIONS_PER_SKILL}"
+            f"{correct}/{self.questions_per_skill}"
         )
 
-        if correct >= self.PASS_THRESHOLD:
+        if correct >= pass_threshold:
             # PASSED this skill
             self._skill_results[skill_code]['passed'] = True
             self._advance_skill(forced=False)
             return 'SKILL_PASSED', {
                 'skill': skill_code,
                 'result': 'PASSED',
-                'score': f"{correct}/{self.QUESTIONS_PER_SKILL}",
+                'score': f"{correct}/{self.questions_per_skill}",
                 'next_skill': self.current_skill_code,
                 'message': f'Well done! You passed {skill_code.title()}.',
             }
@@ -272,7 +387,7 @@ class AdaptiveEngine:
                 return 'SKILL_FAILED_MAX_RETRIES', {
                     'skill': skill_code,
                     'result': 'FAILED',
-                    'score': f"{correct}/{self.QUESTIONS_PER_SKILL}",
+                    'score': f"{correct}/{self.questions_per_skill}",
                     'next_skill': self.current_skill_code,
                     'message': f'You did not pass {skill_code.title()} after {self.MAX_RETRIES + 1} attempts. Moving on.',
                 }
@@ -284,10 +399,10 @@ class AdaptiveEngine:
                 return 'SKILL_FAILED_RETRY', {
                     'skill': skill_code,
                     'result': 'RETRY',
-                    'score': f"{correct}/{self.QUESTIONS_PER_SKILL}",
+                    'score': f"{correct}/{self.questions_per_skill}",
                     'attempt': self._current_skill_attempt,
                     'max_attempts': self.MAX_RETRIES + 1,
-                    'message': f'You need {self.PASS_THRESHOLD}/{self.QUESTIONS_PER_SKILL} to pass. Try {skill_code.title()} again! (Attempt {self._current_skill_attempt}/{self.MAX_RETRIES + 1})',
+                    'message': f'You need {pass_threshold}/{self.questions_per_skill} to pass. Try {skill_code.title()} again! (Attempt {self._current_skill_attempt}/{self.MAX_RETRIES + 1})',
                 }
 
     def _advance_skill(self, forced=False):
@@ -309,7 +424,7 @@ class AdaptiveEngine:
             'current_skill_attempt': self._current_skill_attempt,
             'max_attempts': self.MAX_RETRIES + 1,
             'questions_in_skill': self._current_skill_count,
-            'questions_per_skill': self.QUESTIONS_PER_SKILL,
+            'questions_per_skill': self.questions_per_skill,
             'skill_order': self._skill_order,
             'skills_passed': [k for k, v in self._skill_results.items() if v['passed']],
             'skills_failed': [k for k, v in self._skill_results.items()
@@ -317,6 +432,7 @@ class AdaptiveEngine:
             'skill_results': {k: v for k, v in self._skill_results.items()},
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
+            'current_sublevel': self.current_sublevel.code if self.current_sublevel else None,
         }
 
     LEVEL_PASS_PERCENTAGE = 80.0  # >= 80% overall score to unlock next level
@@ -324,9 +440,10 @@ class AdaptiveEngine:
     def finish_session(self):
         """Finalize the session and compute skill scores."""
         self.session.final_level = self.current_level
+        self.session.final_sublevel = self.current_sublevel
         self.session.ended_at = timezone.now()
         self.session.is_completed = True
-        self.session.save()
+        self.session.save(update_fields=['final_level', 'final_sublevel', 'ended_at', 'is_completed'])
 
         # Compute per-skill scores
         self._compute_skill_scores()
@@ -339,24 +456,37 @@ class AdaptiveEngine:
         # Level passes if overall score >= 80%
         level_passed = pct >= self.LEVEL_PASS_PERCENTAGE
 
-        # Update candidate's level if score >= 80%
+        # Update candidate's sublevel/level if score >= 80%
         if level_passed:
-            next_level = self._get_next_level_up()
-            if next_level:
-                self.candidate.current_cefr_level = next_level
+            next_sublevel = self._get_next_sublevel_up()
+            if next_sublevel:
+                self.candidate.current_cefr_level = next_sublevel.cefr_level
+                self.candidate.current_sublevel = next_sublevel
             else:
-                self.candidate.current_cefr_level = self.current_level
+                next_level = self._get_next_level_up()
+                if next_level:
+                    self.candidate.current_cefr_level = next_level
+                    self.candidate.current_sublevel = CEFRSubLevel.objects.filter(
+                        cefr_level=next_level,
+                        is_active=True,
+                    ).order_by('unit_order').first()
+                else:
+                    self.candidate.current_cefr_level = self.current_level
+                    self.candidate.current_sublevel = self.current_sublevel
         else:
             self.candidate.current_cefr_level = self.current_level
-        self.candidate.save(update_fields=['current_cefr_level'])
+            self.candidate.current_sublevel = self.current_sublevel
+        self.candidate.save(update_fields=['current_cefr_level', 'current_sublevel'])
 
         return {
             'session_id': str(self.session.id),
             'candidate': self.candidate.name,
             'session_type': self.session_type,
             'level': self.current_level.code,
+            'sublevel': self.current_sublevel.code if self.current_sublevel else None,
             'level_passed': level_passed,
-            'next_level': self._get_next_level_up().code if level_passed and self._get_next_level_up() else None,
+            'next_level': self.candidate.current_cefr_level.code if level_passed and self.candidate.current_cefr_level else None,
+            'next_sublevel': self.candidate.current_sublevel.code if level_passed and self.candidate.current_sublevel else None,
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
             'total_score': self.total_score,
@@ -370,6 +500,15 @@ class AdaptiveEngine:
             } for k, v in self._skill_results.items()},
             'history': self._history,
         }
+
+    def _get_next_sublevel_up(self):
+        if not self.current_sublevel:
+            return None
+        return CEFRSubLevel.objects.filter(
+            cefr_level=self.current_level,
+            is_active=True,
+            unit_order__gt=self.current_sublevel.unit_order,
+        ).order_by('unit_order').first()
 
     def _compute_skill_scores(self):
         """Compute and save per-skill score breakdowns."""
