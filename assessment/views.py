@@ -147,8 +147,21 @@ class QuestionListView(View):
         if topic:
             qs = qs.filter(topic__code=topic)
 
+        try:
+            limit = int(request.GET.get('limit', 100))
+        except ValueError:
+            limit = 100
+        try:
+            offset = int(request.GET.get('offset', 0))
+        except ValueError:
+            offset = 0
+
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        total_count = qs.count()
+
         questions = []
-        for q in qs[:100]:
+        for q in qs[offset:offset + limit]:
             questions.append({
                 'question_id': q.question_id,
                 'title': q.title,
@@ -160,7 +173,14 @@ class QuestionListView(View):
                 'difficulty': q.difficulty,
                 'points': q.points,
             })
-        return JsonResponse({'questions': questions, 'count': len(questions)})
+        return JsonResponse({
+            'questions': questions,
+            'count': len(questions),
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset,
+            'has_more': offset + len(questions) < total_count,
+        })
 
 
 class QuestionDetailView(View):
