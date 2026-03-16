@@ -53,6 +53,26 @@ def _normalize_response_format(fmt):
     return mapping.get(fmt, fmt)
 
 
+def _resolve_response_format(question):
+    """Resolve question format with data-aware fallbacks for malformed legacy items."""
+    fmt = _normalize_response_format(question.question_type.response_format)
+
+    # Some legacy synonym items are labeled as matching but contain choice options.
+    if fmt == 'matching':
+        has_pairs = question.matching_pairs.exists()
+        has_options = question.options.exists()
+        if not has_pairs and has_options:
+            return 'single_choice'
+
+    # Some legacy ordering items are sequence text answers without ordering rows.
+    if fmt == 'ordering':
+        has_items = question.ordering_items.exists()
+        if not has_items:
+            return 'text_input'
+
+    return fmt
+
+
 # ── Read-Only Endpoints ──────────────────────────────────────────────
 
 class DashboardView(View):
@@ -226,10 +246,10 @@ class QuestionDetailView(View):
             'media_url': q.media_url, 'media_type': q.media_type,
             'difficulty': q.difficulty, 'points': q.points,
             'time_limit': q.time_limit_seconds,
-            'response_format': _normalize_response_format(q.question_type.response_format),
+            'response_format': _resolve_response_format(q),
         }
 
-        fmt = _normalize_response_format(q.question_type.response_format)
+        fmt = _resolve_response_format(q)
         if fmt in ('single_choice', 'true_false'):
             data['options'] = list(q.options.values('label', 'text', 'media_url', 'order'))
         elif fmt == 'matching':
@@ -345,7 +365,7 @@ class NextQuestionView(View):
             'media_type': question.media_type,
             'points': question.points,
             'time_limit': question.time_limit_seconds,
-            'response_format': _normalize_response_format(question.question_type.response_format),
+            'response_format': _resolve_response_format(question),
             'progress': progress,
         }
 
@@ -386,7 +406,7 @@ class NextQuestionView(View):
             data['speaking_topic'] = question.speaking_topic or question.question_text or question.title
             data['response_expectation'] = 'audio'
 
-        fmt = _normalize_response_format(question.question_type.response_format)
+        fmt = _resolve_response_format(question)
         if fmt in ('single_choice', 'true_false'):
             data['options'] = list(question.options.values('label', 'text', 'order'))
         elif fmt == 'matching':

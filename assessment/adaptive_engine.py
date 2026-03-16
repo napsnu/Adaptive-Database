@@ -687,10 +687,24 @@ class AdaptiveEngine:
             return self._grade_text_input(question, response_text, max_score)
 
         elif fmt == 'matching':
-            return self._grade_matching(question, response_data, max_score)
+            # Fallback for legacy data where matching questions were seeded as options.
+            has_pairs = MatchingPair.objects.filter(question=question).exists()
+            if has_pairs:
+                return self._grade_matching(question, response_data, max_score)
+            if selected_label:
+                return self._grade_choice(question, selected_label, max_score)
+            if response_text and response_text.strip():
+                return self._grade_text_input(question, response_text, max_score)
+            return False, 0.0, 'No answer provided', None
 
         elif fmt == 'ordering':
-            return self._grade_ordering(question, response_data, max_score)
+            # Fallback for legacy data where ordering answers are textual sequences.
+            has_items = OrderingItem.objects.filter(question=question).exists()
+            if has_items:
+                return self._grade_ordering(question, response_data, max_score)
+            if response_text and response_text.strip():
+                return self._grade_text_input(question, response_text, max_score)
+            return False, 0.0, 'No answer provided', None
 
         return False, 0.0, 'Unknown format', None
 

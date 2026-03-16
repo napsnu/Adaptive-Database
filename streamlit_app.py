@@ -685,7 +685,32 @@ def _render_answer_input(question):
     elif fmt == 'matching':
         pairs = list(question.matching_pairs.all().order_by('order'))
         if not pairs:
+            # Legacy fallback: some matching items are actually choice questions.
+            options = list(question.options.all().order_by('order'))
+            if options:
+                with st.form(f"legacy_match_choice_{question.question_id}"):
+                    choices = {f"{opt.label}. {opt.text}": opt.label for opt in options}
+                    selected = st.radio(
+                        "Select your answer:",
+                        list(choices.keys()),
+                        key=f"legacy_match_radio_{question.question_id}"
+                    )
+                    submitted = st.form_submit_button("Submit Answer", type="primary", use_container_width=True)
+                    if submitted:
+                        _submit_answer(question, selected_option_label=choices[selected])
+                        st.rerun()
+                return
+
             st.warning("No matching pairs available.")
+            with st.form(f"legacy_match_text_{question.question_id}"):
+                answer = st.text_input("Your answer:", key=f"legacy_match_text_input_{question.question_id}")
+                submitted = st.form_submit_button("Submit Answer", type="primary", use_container_width=True)
+                if submitted:
+                    if not answer.strip():
+                        st.error("Please enter an answer.")
+                    else:
+                        _submit_answer(question, response_text=answer.strip())
+                        st.rerun()
             return
 
         right_texts = [p.right_text for p in pairs]
@@ -710,6 +735,20 @@ def _render_answer_input(question):
 
     elif fmt == 'ordering':
         items = list(question.ordering_items.all())
+        if not items:
+            # Legacy fallback: some ordering items are stored as sequence text answers.
+            st.info("Enter the correct sequence (example: B A C D).")
+            with st.form(f"legacy_order_text_{question.question_id}"):
+                answer = st.text_input("Your sequence:", key=f"legacy_order_text_input_{question.question_id}")
+                submitted = st.form_submit_button("Submit Answer", type="primary", use_container_width=True)
+                if submitted:
+                    if not answer.strip():
+                        st.error("Please enter the sequence.")
+                    else:
+                        _submit_answer(question, response_text=answer.strip())
+                        st.rerun()
+            return
+
         shuffled = items[:]
         random.shuffle(shuffled)
 
