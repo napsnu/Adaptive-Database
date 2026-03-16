@@ -44,6 +44,15 @@ def _parse_json(request):
         return None
 
 
+def _normalize_response_format(fmt):
+    """Map specialized formats to broadly supported frontend input types."""
+    mapping = {
+        'sentence_build': 'text_input',
+        'picture_prompt': 'long_text',
+    }
+    return mapping.get(fmt, fmt)
+
+
 # ── Read-Only Endpoints ──────────────────────────────────────────────
 
 class DashboardView(View):
@@ -206,10 +215,10 @@ class QuestionDetailView(View):
             'media_url': q.media_url, 'media_type': q.media_type,
             'difficulty': q.difficulty, 'points': q.points,
             'time_limit': q.time_limit_seconds,
-            'response_format': q.question_type.response_format,
+            'response_format': _normalize_response_format(q.question_type.response_format),
         }
 
-        fmt = q.question_type.response_format
+        fmt = _normalize_response_format(q.question_type.response_format)
         if fmt in ('single_choice', 'true_false'):
             data['options'] = list(q.options.values('label', 'text', 'media_url', 'order'))
         elif fmt == 'matching':
@@ -325,7 +334,7 @@ class NextQuestionView(View):
             'media_type': question.media_type,
             'points': question.points,
             'time_limit': question.time_limit_seconds,
-            'response_format': question.question_type.response_format,
+            'response_format': _normalize_response_format(question.question_type.response_format),
             'progress': progress,
         }
 
@@ -366,7 +375,7 @@ class NextQuestionView(View):
             data['speaking_topic'] = question.speaking_topic or question.question_text or question.title
             data['response_expectation'] = 'audio'
 
-        fmt = question.question_type.response_format
+        fmt = _normalize_response_format(question.question_type.response_format)
         if fmt in ('single_choice', 'true_false'):
             data['options'] = list(question.options.values('label', 'text', 'order'))
         elif fmt == 'matching':

@@ -29,7 +29,7 @@ django.setup()
 import streamlit as st
 from assessment.models import (
     CEFRLevel, Skill, Question, QuestionOption,
-    MatchingPair, OrderingItem, Candidate, AssessmentSession,
+    MatchingPair, OrderingItem, Candidate, AssessmentSession, SkillScore,
 )
 from assessment.adaptive_engine import AdaptiveEngine
 from assessment.ai_services import generate_tts_audio, grade_with_gemini
@@ -75,6 +75,7 @@ def init_state():
         'selected_level': 'A1',
         'assessment_history': [],
         'tts_audio_b64': None,
+        'candidate': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -132,55 +133,193 @@ st.markdown("""
 # ═════════════════════════════════════════════════════════════════════
 
 def page_home():
-    """Landing / Home page."""
-    st.markdown("## 📚 Adaptive CEFR English Assessment Platform")
-    st.markdown("Test your English skills across **Reading**, **Writing**, **Speaking**, and **Listening** with AI-powered adaptive assessment.")
+    """Login / landing page — redirects to dashboard if already signed in."""
+    if st.session_state.candidate:
+        go_to('dashboard')
+        st.rerun()
+        return
 
+    st.markdown("## 📚 CEFR Mastery Hub")
+    st.markdown("Adaptive English Learning Platform — test all 4 skills with AI-powered adaptive assessment.")
     st.divider()
 
-    # Quick stats
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        count = CEFRLevel.objects.count()
-        st.metric("CEFR Levels", count)
-    with col2:
-        count = Question.objects.filter(is_active=True).count()
-        st.metric("Questions", count)
-    with col3:
-        st.metric("Skills", "4")
-    with col4:
-        st.metric("AI Grading", "Gemini")
+    col_l, col_m, col_r = st.columns([1, 2, 1])
+    with col_m:
+        with st.form("login_form"):
+            st.markdown("### 🔑 Sign In")
+            name = st.text_input("Full Name", placeholder="Enter your name")
+            email = st.text_input("Email", placeholder="your@email.com")
+            submitted = st.form_submit_button("Continue →", type="primary", use_container_width=True)
+            if submitted:
+                if not name.strip() or not email.strip():
+                    st.error("Please enter both name and email.")
+                else:
+                    candidate, _ = Candidate.objects.get_or_create(
+                        email=email.strip().lower(),
+                        defaults={'name': name.strip()}
+                    )
+                    st.session_state.candidate = candidate
+                    st.session_state.candidate_name = candidate.name
+                    st.session_state.candidate_email = candidate.email
+                    go_to('dashboard')
+                    st.rerun()
+        st.caption("No account needed — just enter your name and email to get started.")
 
     st.divider()
-
-    # How it works
-    st.markdown("### How It Works")
     cols = st.columns(4)
-    steps = [
+    for col, (title, desc) in zip(cols, [
         ("📖 Reading", "Comprehension, fill-in-gaps, true/false"),
         ("✍️ Writing", "Short answers, essays, gap-fill"),
         ("🎤 Speaking", "Read aloud, describe, give opinions"),
-        ("🎧 Listening", "Audio playback, comprehension questions"),
-    ]
-    for col, (title, desc) in zip(cols, steps):
+        ("🎧 Listening", "AI-generated audio, comprehension"),
+    ]):
         with col:
             st.markdown(f"**{title}**")
             st.caption(desc)
+    st.info("**Flow:** A1 → C2. Each level tests all 4 skills. Score ≥80% to unlock the next level.")
 
-    st.info("**Flow:** You pick a level (A1-C2). The engine tests all 4 skills in order. "
-            "Pass 2/3 questions per skill to advance. Fail? You get up to 3 attempts.")
 
+def page_dashboard():
+    """Candidate dashboard — mirrors the Lovable app layout."""
+    candidate = st.session_state.candidate
+    if not candidate:
+        go_to('home')
+        st.rerun()
+        return
+
+    try:
+        candidate.refresh_from_db()
+    except Exception:
+        pass
+
+    st.markdown(f"## 👤 {candidate.name}'s Dashboard")
     st.divider()
 
-    col_left, col_right = st.columns(2)
-    with col_left:
+    # ── Stats cards ──────────────────────────────────────────────────
+    completed_sessions = AssessmentSession.objects.filter(candidate=candidate, is_completed=True)
+    total_sessions = completed_sessions.count()
+    avg_score = 0.0
+    if total_sessions > 0:
+        avg_score = sum(s.percentage for s in completed_sessions) / total_sessions
+
+    skill_avgs = {}
+    for ss in SkillScore.objects.filter(session__candidate=candidate).select_related('skill'):
+        skill_avgs.setdefault(ss.skill.code, []).append(ss.percentage)
+    strongest_skill = (
+        max(skill_avgs, key=lambda k: sum(skill_avgs[k]) / len(skill_avgs[k]))
+        if skill_avgs else None
+    )
+
+    current_level_obj = candidate.current_cefr_level
+    current_level_code = current_level_obj.code if current_level_obj else 'N/A'
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("ASSESSMENTS", total_sessions)
+    with col2:
+        st.metric("AVERAGE SCORE", f"{avg_score:.0f}%" if total_sessions > 0 else "—")
+    with col3:
+        if strongest_skill:
+            icon = SKILL_ICONS.get(strongest_skill, '')
+            st.metric("STRONGEST SKILL", f"{icon} {strongest_skill.title()}")
+        else:
+            st.metric("STRONGEST SKILL", "—")
+    with col4:
+        st.metric("CURRENT LEVEL", current_level_code)
+
+    # ── CEFR Progression ─────────────────────────────────────────────
+    st.divider()
+    st.markdown("### CEFR Progression")
+
+    levels = list(CEFRLevel.objects.all().order_by('order'))
+    passed_level_codes = set()
+    if current_level_obj:
+        for lv in levels:
+            if lv.order < current_level_obj.order:
+                passed_level_codes.add(lv.code)
+
+    level_cols = st.columns(len(levels))
+    for col, lv in zip(level_cols, levels):
+        with col:
+            is_passed = lv.code in passed_level_codes
+            is_current = current_level_obj and lv.code == current_level_obj.code
+            if is_passed:
+                bg, fg, icon = '#22C55E', 'white', '✅'
+            elif is_current:
+                bg, fg, icon = '#3B82F6', 'white', '📍'
+            else:
+                bg, fg, icon = '#E5E7EB', '#9CA3AF', '🔒'
+            st.markdown(
+                f'<div style="background:{bg};color:{fg};border-radius:12px;padding:14px 8px;'
+                f'text-align:center;margin:2px;">'
+                f'<div style="font-size:20px">{icon}</div>'
+                f'<div style="font-weight:700;font-size:17px;margin-top:4px">{lv.code}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+    st.caption("≥80% to unlock the next level")
+
+    # ── Quick actions ─────────────────────────────────────────────────
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    with col1:
         if st.button("🚀 Start Assessment", type="primary", use_container_width=True):
             go_to('setup')
             st.rerun()
-    with col_right:
-        if st.button("📊 View Question Bank", use_container_width=True):
+    with col2:
+        if st.button("📋 Question Bank", use_container_width=True):
             go_to('questions')
             st.rerun()
+    with col3:
+        if st.button("📜 History", use_container_width=True):
+            go_to('history')
+            st.rerun()
+
+    # ── Level Roadmap ─────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Level Roadmap")
+    st.caption("Each level tests all 4 skills: Reading → Writing → Listening → Speaking")
+
+    for lv in levels:
+        is_passed = lv.code in passed_level_codes
+        is_current = current_level_obj and lv.code == current_level_obj.code
+        is_locked = not is_passed and not is_current
+        prefix = '✅ ' if is_passed else '📍 ' if is_current else '🔒 '
+        with st.expander(f"{prefix}{lv.code} — {lv.name}", expanded=bool(is_current)):
+            if lv.description:
+                st.caption(lv.description)
+            skill_cols = st.columns(4)
+            for sc, (sk_code, sk_icon) in zip(skill_cols, SKILL_ICONS.items()):
+                with sc:
+                    q_cnt = Question.objects.filter(
+                        cefr_level=lv, skill__code=sk_code, is_active=True
+                    ).count()
+                    st.metric(f"{sk_icon} {sk_code.title()}", q_cnt)
+            if not is_locked:
+                if st.button(
+                    f"Start {lv.code} Assessment",
+                    key=f"dash_start_{lv.code}",
+                    use_container_width=True,
+                    type="primary" if is_current else "secondary",
+                ):
+                    st.session_state.selected_level = lv.code
+                    _start_assessment()
+                    st.rerun()
+
+    # ── Recent sessions ───────────────────────────────────────────────
+    if total_sessions > 0:
+        st.divider()
+        st.markdown("### Recent Sessions")
+        recent = (
+            completed_sessions
+            .select_related('starting_level', 'final_level')
+            .order_by('-started_at')[:5]
+        )
+        for s in recent:
+            mark = "✅" if s.percentage >= 80 else "❌"
+            lv_code = s.final_level.code if s.final_level else '?'
+            date_str = s.started_at.strftime('%b %d, %Y') if s.started_at else ''
+            st.markdown(f"{mark} Level **{lv_code}** — **{s.percentage:.0f}%** — {date_str}")
 
 
 def page_setup():
@@ -235,10 +374,14 @@ def page_setup():
 
 def _start_assessment():
     """Initialize the adaptive engine and start a session."""
-    candidate, _ = Candidate.objects.get_or_create(
-        email=st.session_state.candidate_email,
-        defaults={'name': st.session_state.candidate_name}
-    )
+    if st.session_state.candidate:
+        candidate = st.session_state.candidate
+    else:
+        candidate, _ = Candidate.objects.get_or_create(
+            email=st.session_state.candidate_email,
+            defaults={'name': st.session_state.candidate_name}
+        )
+        st.session_state.candidate = candidate
 
     engine = AdaptiveEngine(
         candidate,
@@ -336,6 +479,9 @@ def page_assessment():
             st.success(f"✅ Previous answer correct! +{r['score']} points — {r['feedback']}")
         else:
             st.error(f"❌ Previous answer incorrect — {r['feedback']}")
+            if r.get('action') == 'QUESTION_RETRY':
+                remaining = r.get('question_remaining_attempts', 1)
+                st.info(f"💡 You have **{remaining}** more attempt(s) for this question — try again!")
         st.session_state.last_result = None
 
     # ── Render question by skill type ────────────────────────────
@@ -505,9 +651,10 @@ def _render_answer_input(question):
                 _submit_answer(question, selected_option_label=label)
                 st.rerun()
 
-    elif fmt == 'text_input':
+    elif fmt in ('text_input', 'sentence_build'):
         with st.form(f"text_{question.question_id}"):
-            answer = st.text_input("Your answer:", key=f"text_input_{question.question_id}")
+            label = "Build your sentence:" if fmt == 'sentence_build' else "Your answer:"
+            answer = st.text_input(label, key=f"text_input_{question.question_id}")
             submitted = st.form_submit_button("Submit Answer", type="primary", use_container_width=True)
 
             if submitted:
@@ -517,10 +664,11 @@ def _render_answer_input(question):
                     _submit_answer(question, response_text=answer.strip())
                     st.rerun()
 
-    elif fmt in ('long_text', 'audio'):
+    elif fmt in ('long_text', 'audio', 'picture_prompt'):
         with st.form(f"long_{question.question_id}"):
+            label = "Describe what you see:" if fmt == 'picture_prompt' else "Your response:"
             answer = st.text_area(
-                "Your response:",
+                label,
                 height=150,
                 key=f"long_input_{question.question_id}",
                 placeholder="Write your response here..."
@@ -584,7 +732,22 @@ def _render_answer_input(question):
                 st.rerun()
 
     else:
-        st.warning(f"Unknown response format: {fmt}")
+        # Safety net: if new formats are seeded, keep the assessment usable.
+        st.warning(f"Unknown response format '{fmt}'. Using text response fallback.")
+        with st.form(f"fallback_{question.question_id}"):
+            answer = st.text_area(
+                "Your response:",
+                height=140,
+                key=f"fallback_input_{question.question_id}",
+                placeholder="Type your answer here..."
+            )
+            submitted = st.form_submit_button("Submit Answer", type="primary", use_container_width=True)
+            if submitted:
+                if not answer.strip():
+                    st.error("Please enter a response.")
+                else:
+                    _submit_answer(question, response_text=answer.strip())
+                    st.rerun()
 
 
 def _submit_answer(question, selected_option_label=None, response_text='',
@@ -952,9 +1115,27 @@ def main():
         st.markdown("## 📚 CEFR Platform")
         st.divider()
 
-        if st.button("🏠 Home", use_container_width=True):
-            go_to('home')
-            st.rerun()
+        # Candidate info + logout
+        candidate = st.session_state.candidate
+        if candidate:
+            st.markdown(f"**👤 {candidate.name}**")
+            current_lv = candidate.current_cefr_level.code if candidate.current_cefr_level else 'A1'
+            st.caption(f"Level: {current_lv} | {candidate.email}")
+            if st.button("🚪 Logout", use_container_width=True):
+                st.session_state.candidate = None
+                st.session_state.engine = None
+                st.session_state.current_question = None
+                go_to('home')
+                st.rerun()
+            st.divider()
+            if st.button("🏠 Dashboard", use_container_width=True):
+                go_to('dashboard')
+                st.rerun()
+        else:
+            if st.button("🏠 Home", use_container_width=True):
+                go_to('home')
+                st.rerun()
+
         if st.button("🎯 Start Assessment", use_container_width=True):
             go_to('setup')
             st.rerun()
@@ -995,6 +1176,8 @@ def main():
     page = st.session_state.page
     if page == 'home':
         page_home()
+    elif page == 'dashboard':
+        page_dashboard()
     elif page == 'setup':
         page_setup()
     elif page == 'assessment':
