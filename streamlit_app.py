@@ -408,6 +408,24 @@ def _render_speaking_question(question):
     """Render a speaking question with microphone simulation."""
     st.markdown("#### 🎤 Speaking Question")
 
+    instruction = (
+        question.instruction_text
+        or question.question_type.instruction_template
+        or "Speak clearly and stay on topic."
+    )
+    speaking_topic = (
+        getattr(question, "speaking_topic", None)
+        or question.question_text
+        or question.title
+        or "Please answer the prompt aloud."
+    )
+
+    st.markdown("### Speaking Prompt")
+    st.info(speaking_topic)
+    st.caption(f"Instruction: {instruction}")
+    st.caption("Expected response: Spoken answer (microphone)")
+    st.divider()
+
     if question.question_type.code == 'read_aloud':
         st.info("In a real assessment, you would **speak into a microphone**. "
                 "The AI grades your pronunciation, accuracy, and fluency. "
@@ -433,7 +451,8 @@ def _render_speaking_question(question):
             st.markdown(f"*{question.content_text}*")
 
     st.divider()
-    st.markdown(f"**{question.question_text}**")
+    if question.question_text:
+        st.markdown(f"**{question.question_text}**")
 
     # Speaking input — text area simulating microphone
     with st.form(f"speaking_{question.question_id}"):

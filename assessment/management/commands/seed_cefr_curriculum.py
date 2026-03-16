@@ -25,7 +25,10 @@ Management command
 Idempotent: uses update_or_create on question_id so it is safe to re-run.
 """
 
-from django.core.management.base import BaseCommand
+import copy
+
+from django.core.management.base import BaseCommand, CommandError
+from django.db import connection
 
 from assessment.models import (
     DifficultyTier,
@@ -77,6 +80,55 @@ SKILLS = [
     ("listening", "Listening", 3),
     ("speaking",  "Speaking",  4),
 ]
+
+# ---------------------------------------------------------------------------
+# PEDAGOGICAL PROGRESSION BLUEPRINT
+# ---------------------------------------------------------------------------
+# This metadata is used as authoring guidance and runtime validation anchors.
+# It keeps complexity predictable across:
+#   tier -> CEFR level -> sublevel -> skill question set
+
+GRADE_BAND_TARGETS = {
+    "beginner": {
+        "current": "Grade 4-5",
+        "future_extension": "Grade 10-12 starter tracks can branch from this baseline",
+    },
+    "intermediate": {
+        "current": "Grade 6-7",
+        "future_extension": "Bridges to Grade 10-12 academic English",
+    },
+    "advanced": {
+        "current": "Grade 8-9",
+        "future_extension": "Pre-university register and argumentation",
+    },
+}
+
+# Tier multiplier signals relative lexical/syntactic load.
+TIER_COMPLEXITY_ORDER = {
+    "beginner": 1,
+    "intermediate": 2,
+    "advanced": 3,
+}
+
+# CEFR-level language expectations (used as writing guidance for content batches).
+CEFR_COMPLEXITY_GUIDE = {
+    "A1": "high-frequency vocabulary, simple present, short concrete sentences",
+    "A2": "routine contexts, basic connectors (and/but/because), short paragraph control",
+    "B1": "multi-sentence reasoning, everyday abstract topics, clearer discourse markers",
+    "B2": "topic development with examples, contrast, and cause-effect precision",
+    "C1": "nuanced argument, register control, rhetorical organization",
+    "C2": "near-native flexibility, subtle stance, synthesis of complex ideas",
+}
+
+# Minimum diversity target by skill: unique qtypes per sublevel skill bank.
+SKILL_MIN_VARIETY = {
+    "reading": 6,
+    "writing": 6,
+    "listening": 6,
+    "speaking": 6,
+}
+
+REQUIRED_QUESTION_KEYS = ("qtype", "prompt", "explanation")
 
 # ---------------------------------------------------------------------------
 # QUESTION-TYPE TAXONOMY (full list per the UX brief)
@@ -1229,10 +1281,1174 @@ QUESTION_BANK = {
 
     },  # end beginner
 
-    # ### EXPAND ### - Add intermediate and advanced tiers here.
-    # "intermediate": { "A1": {...}, ... },
+    # =========================================================================
+    # TIER: INTERMEDIATE  (Grade 6-7)
+    # =========================================================================
+    "intermediate": {
+
+        # ---- CEFR A1 --------------------------------------------------------
+        "A1": {
+
+            # -- Unit 1: Greetings & Introductions ----------------------------
+            1: {
+                "reading": [
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "Good morning. My name is Noor Hassan, and I am eleven years old. I recently moved to Kuala Lumpur with my parents and younger brother. In class, I enjoy science and art projects.",
+                        "prompt": "Why did Noor introduce her family in the passage?",
+                        "options": [("A", "To explain where she lives now", True), ("B", "To describe a science experiment", False), ("C", "To ask for homework help", False), ("D", "To complain about school", False)],
+                        "correct": "A",
+                        "explanation": "Noor says she moved with her family, so the family detail explains her new situation.",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "I am Daniel. I joined Green Valley School last month. At first I was nervous, but my classmates welcomed me warmly.",
+                        "prompt": "Daniel felt confident from the very first day.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "Daniel says he was nervous at first, so he was not confident at the beginning.",
+                    },
+                    {
+                        "qtype": "fill_in_the_blank",
+                        "prompt": "Complete the sentence: 'Pleased to ___ you. I am from Cebu.'",
+                        "correct": "meet",
+                        "accepted": ["meet"],
+                        "explanation": "The fixed polite expression is 'Pleased to meet you'.",
+                    },
+                    {
+                        "qtype": "detail_scan",
+                        "content": "My full name is Lucia Romero. People call me Lucy. I am in Grade 6, and I live near the city library.",
+                        "prompt": "What nickname does Lucia use?",
+                        "correct": "lucy",
+                        "accepted": ["Lucy", "lucy"],
+                        "explanation": "The passage clearly says people call Lucia 'Lucy'.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "main_idea",
+                        "content": "Hello classmates, my name is Ivan. I like basketball, coding games, and reading adventure stories. I hope we can work together this year.",
+                        "prompt": "What is the main idea of Ivan's message?",
+                        "options": [("A", "He is inviting everyone to play basketball only", False), ("B", "He is introducing himself and his interests", True), ("C", "He is reviewing an adventure book", False), ("D", "He is announcing a school competition", False)],
+                        "correct": "B",
+                        "explanation": "Ivan gives his name, hobbies, and a friendly closing, which is a self-introduction.",
+                    },
+                    {
+                        "qtype": "reference_question",
+                        "content": "This is my friend Amina. She speaks Arabic and English. Her teacher says she is very helpful.",
+                        "prompt": "In the last sentence, who does 'she' refer to?",
+                        "correct": "amina|Amina",
+                        "accepted": ["Amina", "amina", "my friend Amina"],
+                        "explanation": "The pronoun 'she' points back to Amina in the previous sentence.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "short_answer",
+                        "content": "Hi, I am Ken. I am from Osaka. I enjoy drawing comic characters and practicing the guitar.",
+                        "prompt": "Name one activity Ken enjoys.",
+                        "correct": "drawing comic characters|practicing the guitar|drawing|guitar",
+                        "accepted": ["drawing comic characters", "practicing the guitar", "drawing", "guitar"],
+                        "explanation": "Ken says he likes drawing comic characters and practicing guitar.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "sequence_order",
+                        "prompt": "Order these actions in a polite first meeting: A) Say your name  B) Greet the person  C) Ask the person's name  D) Say 'Nice to meet you'",
+                        "correct": "B, A, C, D",
+                        "accepted": ["B A C D", "B, A, C, D", "BACD"],
+                        "explanation": "A polite sequence is to greet first, introduce yourself, ask the other person's name, then close politely.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "synonym_match",
+                        "prompt": "Choose the word closest in meaning to 'friendly'.",
+                        "options": [("A", "kind", True), ("B", "silent", False), ("C", "angry", False), ("D", "late", False)],
+                        "correct": "A",
+                        "explanation": "'Kind' is closest in meaning to 'friendly' in this context.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "My name is Fatih, and I joined the school debate club. I am still shy, but speaking practice helps me become more confident each week.",
+                        "prompt": "What change is Fatih noticing?",
+                        "options": [("A", "He stopped attending school", False), ("B", "He is becoming more confident", True), ("C", "He wants to quit debate club", False), ("D", "He changed his name", False)],
+                        "correct": "B",
+                        "explanation": "Fatih says speaking practice helps him become more confident.",
+                    },
+                ],
+
+                "writing": [
+                    {
+                        "qtype": "guided_sentence",
+                        "prompt": "Write one complete sentence introducing yourself with your full name and grade.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong response includes full name and grade in a grammatically correct sentence.",
+                    },
+                    {
+                        "qtype": "error_correction",
+                        "prompt": "Correct the sentence: 'She are my new classmate from Brunei.'",
+                        "correct": "She is my new classmate from Brunei.",
+                        "accepted": ["She is my new classmate from Brunei.", "She is my new classmate from Brunei"],
+                        "explanation": "Use 'is' with 'she' and keep the sentence in correct subject-verb agreement.",
+                    },
+                    {
+                        "qtype": "sentence_rewrite",
+                        "prompt": "Rewrite as a question: 'You are in Grade 7.'",
+                        "correct": "Are you in Grade 7?",
+                        "accepted": ["Are you in Grade 7?", "Are you in Grade 7"],
+                        "explanation": "For a be-verb question, place 'Are' before the subject.",
+                    },
+                    {
+                        "qtype": "transformation",
+                        "prompt": "Complete with the same meaning: 'I come from Jakarta.' -> 'My hometown ___ Jakarta.'",
+                        "correct": "is",
+                        "accepted": ["is"],
+                        "explanation": "'My hometown is Jakarta' keeps the same meaning as the original sentence.",
+                    },
+                    {
+                        "qtype": "ordering_words",
+                        "prompt": "Arrange the words: usually / in / introduce / myself / politely / I / class",
+                        "correct": "I usually introduce myself politely in class.",
+                        "accepted": ["I usually introduce myself politely in class.", "I usually introduce myself politely in class"],
+                        "explanation": "Correct order uses subject + adverb + verb + object + manner + place.",
+                    },
+                    {
+                        "qtype": "completion",
+                        "prompt": "Complete: 'Nice to meet you. I hope we ___ good friends.'",
+                        "correct": "become|can become|will become",
+                        "accepted": ["become", "can become", "will become"],
+                        "explanation": "All accepted choices complete the idea naturally and grammatically.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "guided_paragraph",
+                        "prompt": "Write 5-6 sentences introducing yourself to a new class. Include: name, age, city, two hobbies, and one learning goal.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete paragraph covers all required points with clear sentence boundaries.",
+                    },
+                    {
+                        "qtype": "opinion_short",
+                        "prompt": "Do first impressions matter at school? Write 3-4 sentences and give one reason.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The response should state an opinion and support it with a relevant reason.",
+                    },
+                    {
+                        "qtype": "picture_based_prompt",
+                        "prompt": "Imagine a picture of two students meeting in class. Write 3 sentences describing what they say and how they feel.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong responses include greeting language and an emotion word.",
+                    },
+                    {
+                        "qtype": "write_letter",
+                        "prompt": "Write a short email (5-6 sentences) to a pen friend introducing yourself and asking two questions about their school life.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A good email includes self-introduction, two clear questions, and polite closing language.",
+                    },
+                ],
+
+                "listening": [
+                    {
+                        "qtype": "dictation_sentence",
+                        "content": "[Transcript] Hello everyone, my name is Hana and I moved here last week.",
+                        "prompt": "Write the sentence you hear.",
+                        "correct": "Hello everyone, my name is Hana and I moved here last week.",
+                        "accepted": ["Hello everyone, my name is Hana and I moved here last week.", "Hello everyone, my name is Hana and I moved here last week"],
+                        "explanation": "The dictation sentence includes a greeting, name, and time phrase.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Hi, I am Omar. Could you please tell me where the science lab is?",
+                        "prompt": "Why is Omar speaking?",
+                        "options": [("A", "To introduce his project", False), ("B", "To ask for directions politely", True), ("C", "To invite someone home", False), ("D", "To order lunch", False)],
+                        "correct": "B",
+                        "explanation": "Omar politely asks where the science lab is, which is a direction request.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] Girl: I am 12 years old and I enjoy robotics club on Tuesdays.",
+                        "prompt": "Which club does the speaker enjoy?",
+                        "options": [("A", "Drama club", False), ("B", "Robotics club", True), ("C", "Swimming club", False), ("D", "Music club", False)],
+                        "correct": "B",
+                        "explanation": "The speaker explicitly says she enjoys robotics club.",
+                    },
+                    {
+                        "qtype": "missing_word",
+                        "content": "[Transcript] It is a pleasure to ___ you.",
+                        "prompt": "Write the missing word.",
+                        "correct": "meet",
+                        "accepted": ["meet"],
+                        "explanation": "The standard phrase is 'a pleasure to meet you'.",
+                    },
+                    {
+                        "qtype": "short_response",
+                        "content": "[Transcript] Boy: I am from Surabaya, but now I live near the central park with my aunt.",
+                        "prompt": "Where does the boy live now?",
+                        "correct": "near the central park|near central park|with his aunt near the central park",
+                        "accepted": ["near the central park", "near central park", "with his aunt near the central park"],
+                        "explanation": "He says he now lives near the central park with his aunt.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "[Transcript] Teacher: Please introduce your partner, not yourself, in this activity.",
+                        "prompt": "Students must introduce themselves in this activity.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "The teacher clearly asks students to introduce their partner.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "[Transcript] My name is Paulo. I speak Portuguese at home and English at school.",
+                        "prompt": "Where does Paulo speak English?",
+                        "options": [("A", "At home", False), ("B", "At school", True), ("C", "At the market", False), ("D", "At the hospital", False)],
+                        "correct": "B",
+                        "explanation": "Paulo says he speaks English at school.",
+                    },
+                    {
+                        "qtype": "dictation_word",
+                        "content": "[Transcript] I am happy to join this ___ class.",
+                        "prompt": "Write the missing word.",
+                        "correct": "new",
+                        "accepted": ["new"],
+                        "explanation": "The phrase 'join this new class' fits the context and transcript.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] The student says: 'I like reading biographies because real stories inspire me.'",
+                        "prompt": "Why does the student like biographies?",
+                        "options": [("A", "They are short", False), ("B", "They are funny", False), ("C", "Real stories inspire the student", True), ("D", "They have many pictures", False)],
+                        "correct": "C",
+                        "explanation": "The student says biographies are inspiring because they are real stories.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Excuse me, I did not catch your name. Could you repeat it slowly, please?",
+                        "prompt": "What does the speaker want?",
+                        "options": [("A", "To end the conversation", False), ("B", "To hear the name again clearly", True), ("C", "To change classes", False), ("D", "To give directions", False)],
+                        "correct": "B",
+                        "explanation": "The speaker asks for repetition to understand the name.",
+                    },
+                ],
+
+                "speaking": [
+                    {
+                        "qtype": "topic_prompt",
+                        "prompt": "Introduce yourself to a new class in 30-45 seconds. Include your name, where you are from, and one learning goal.",
+                        "speaking_topic": "Self-introduction with location and learning goal.",
+                        "instruction": "Use complete sentences and at least one connector such as 'and' or 'because'.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong response includes identity details and one clear goal.",
+                    },
+                    {
+                        "qtype": "role_play_response",
+                        "prompt": "Role play: You are meeting your class monitor for the first time. Greet them, introduce yourself, and ask one polite question.",
+                        "speaking_topic": "First-day meeting with class monitor.",
+                        "instruction": "Speak naturally and include one polite question form.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The response should include greeting, self-introduction, and one respectful question.",
+                    },
+                    {
+                        "qtype": "describe_picture",
+                        "prompt": "Imagine a picture of students introducing themselves in a circle. Describe what they are doing and how the mood feels.",
+                        "speaking_topic": "Describe a classroom introduction activity.",
+                        "instruction": "Speak for 30-40 seconds and use at least two descriptive words.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Good answers describe actions and emotions using clear vocabulary.",
+                    },
+                    {
+                        "qtype": "read_aloud",
+                        "content": "Good afternoon, everyone. My name is Rina Putri. I enjoy reading mysteries and practicing volleyball after school.",
+                        "prompt": "Read the passage aloud.",
+                        "speaking_topic": "Read-aloud: extended personal introduction.",
+                        "instruction": "Maintain clear pacing and natural pauses.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Accurate pronunciation and pacing show confident oral reading.",
+                    },
+                    {
+                        "qtype": "short_opinion",
+                        "prompt": "Do you think it is important to learn classmates' names quickly? Give your opinion and one reason.",
+                        "speaking_topic": "Opinion on learning classmates' names quickly.",
+                        "instruction": "Speak for about 25-35 seconds.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete response states a stance and supports it with one relevant reason.",
+                    },
+                    {
+                        "qtype": "compare_two_items",
+                        "prompt": "Compare introducing yourself in person and introducing yourself in an email. Give one similarity and one difference.",
+                        "speaking_topic": "Compare face-to-face and email introductions.",
+                        "instruction": "Use words like 'both', 'however', or 'but'.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The answer should show comparison language with one clear similarity and one difference.",
+                    },
+                    {
+                        "qtype": "guided_speaking",
+                        "prompt": "Use these prompts in order: 1) My name is... 2) I moved from... 3) I want to improve... 4) I hope to...",
+                        "speaking_topic": "Guided four-step personal introduction.",
+                        "instruction": "Make one complete sentence for each prompt.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong responses include all prompts with coherent sequencing.",
+                    },
+                    {
+                        "qtype": "personal_response",
+                        "prompt": "What kind of classmate do you want to be this year, and why?",
+                        "speaking_topic": "Personal goal for classroom behavior.",
+                        "instruction": "Answer in 2-3 sentences.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong answer describes a personal trait and a reason.",
+                    },
+                    {
+                        "qtype": "repeat_sentence",
+                        "content": "It is nice to meet you, and I look forward to learning together.",
+                        "prompt": "Listen and repeat the sentence.",
+                        "speaking_topic": "Repeat a polite future-oriented greeting.",
+                        "instruction": "Repeat with clear stress on key words.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The sentence should be reproduced accurately with natural rhythm.",
+                    },
+                    {
+                        "qtype": "sentence_building_oral",
+                        "prompt": "Say a complete sentence using: class / new / my / this / is / first / in / week",
+                        "speaking_topic": "Sentence building about first week in new class.",
+                        "correct": "This is my first week in this new class.",
+                        "accepted": ["This is my first week in this new class.", "This is my first week in this new class"],
+                        "match_mode": "normalized",
+                        "explanation": "Correct word order creates a meaningful statement about the first week.",
+                    },
+                ],
+            },
+
+            # -- Unit 2: Daily Life & Family ----------------------------------
+            2: {
+                "reading": [
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "On weekdays, Amira wakes up at 5:45, helps her brother prepare breakfast, and cycles to school by 7:00. In the evening, she reviews her notes and reads for thirty minutes.",
+                        "prompt": "Which activity happens before Amira goes to school?",
+                        "options": [("A", "Reading for thirty minutes", False), ("B", "Helping her brother prepare breakfast", True), ("C", "Reviewing notes", False), ("D", "Cycling with friends", False)],
+                        "correct": "B",
+                        "explanation": "The passage states that Amira helps prepare breakfast before leaving for school.",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "Rafi's father works in a clinic, and his mother manages a small bakery from home. Their family usually eats dinner together at 7:30 p.m.",
+                        "prompt": "Rafi's mother works at a clinic.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "The clinic job belongs to Rafi's father, while his mother manages a bakery.",
+                    },
+                    {
+                        "qtype": "fill_in_the_blank",
+                        "prompt": "Complete: My sister ___ her homework before dinner every day.",
+                        "correct": "finishes|does",
+                        "accepted": ["finishes", "does"],
+                        "explanation": "Both verbs can complete the routine sentence correctly in context.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "detail_scan",
+                        "content": "Every Saturday morning, Leo cleans his room, waters the plants, and then practices piano for one hour.",
+                        "prompt": "What does Leo do after watering the plants?",
+                        "correct": "practices piano|practices the piano|plays piano",
+                        "accepted": ["practices piano", "practices the piano", "plays piano"],
+                        "explanation": "The final step listed is practicing piano for one hour.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "main_idea",
+                        "content": "The Ibrahim family has a weekly plan for chores. Everyone has responsibilities, and they rotate tasks every month so each person learns different skills.",
+                        "prompt": "What is the main idea of the passage?",
+                        "options": [("A", "The family dislikes chores", False), ("B", "The family shares chores in an organized way", True), ("C", "The family hires workers", False), ("D", "The family only cleans monthly", False)],
+                        "correct": "B",
+                        "explanation": "The text focuses on planned and shared household responsibilities.",
+                    },
+                    {
+                        "qtype": "short_answer",
+                        "content": "Nia's grandfather picks her up from school twice a week because her parents finish work late on those days.",
+                        "prompt": "Why does Nia's grandfather pick her up?",
+                        "correct": "because her parents finish work late|her parents work late",
+                        "accepted": ["because her parents finish work late", "her parents work late"],
+                        "explanation": "The passage provides the reason directly: her parents finish work late.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "reference_question",
+                        "content": "Marta has a younger cousin. He visits every Sunday, and they build model airplanes together.",
+                        "prompt": "What does 'He' refer to?",
+                        "correct": "marta's younger cousin|the younger cousin|her cousin",
+                        "accepted": ["Marta's younger cousin", "the younger cousin", "her cousin"],
+                        "explanation": "The pronoun 'He' points to the younger cousin in the first sentence.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "sequence_order",
+                        "prompt": "Order this evening routine: A) Have dinner  B) Pack school bag  C) Finish homework  D) Go to bed",
+                        "correct": "C, A, B, D",
+                        "accepted": ["C A B D", "C, A, B, D", "CABD"],
+                        "explanation": "A realistic sequence is homework, dinner, preparing for next day, then sleep.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "synonym_match",
+                        "prompt": "Choose the closest synonym for 'routine'.",
+                        "options": [("A", "habit", True), ("B", "surprise", False), ("C", "holiday", False), ("D", "challenge", False)],
+                        "correct": "A",
+                        "explanation": "In this context, 'routine' means a regular habit.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "Before exams, Huda creates a timetable with short study blocks and breaks. She says this method helps her stay focused.",
+                        "prompt": "Why does Huda use a timetable?",
+                        "options": [("A", "To avoid all homework", False), ("B", "To stay focused while studying", True), ("C", "To wake up later", False), ("D", "To skip breaks", False)],
+                        "correct": "B",
+                        "explanation": "The passage explains that the timetable helps her stay focused.",
+                    },
+                ],
+
+                "writing": [
+                    {
+                        "qtype": "guided_sentence",
+                        "prompt": "Write one sentence about a weekday responsibility you have at home.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A suitable sentence states a specific routine responsibility clearly.",
+                    },
+                    {
+                        "qtype": "error_correction",
+                        "prompt": "Correct the sentence: 'My brother wash the dishes every night.'",
+                        "correct": "My brother washes the dishes every night.",
+                        "accepted": ["My brother washes the dishes every night.", "My brother washes the dishes every night"],
+                        "explanation": "Third-person singular in present simple requires 'washes'.",
+                    },
+                    {
+                        "qtype": "sentence_rewrite",
+                        "prompt": "Rewrite using frequency adverb: 'I help my parents. (usually)'",
+                        "correct": "I usually help my parents.",
+                        "accepted": ["I usually help my parents.", "I usually help my parents"],
+                        "explanation": "Place 'usually' before the main verb in this sentence.",
+                    },
+                    {
+                        "qtype": "transformation",
+                        "prompt": "Complete with the same meaning: 'She does homework after school.' -> 'After school, homework ___ by her.'",
+                        "correct": "is done",
+                        "accepted": ["is done"],
+                        "explanation": "The passive structure 'is done' preserves meaning at this controlled level.",
+                    },
+                    {
+                        "qtype": "ordering_words",
+                        "prompt": "Arrange the words: weekend / with / grandparents / visit / I / my / every / often",
+                        "correct": "I often visit my grandparents every weekend.",
+                        "accepted": ["I often visit my grandparents every weekend.", "I often visit my grandparents every weekend"],
+                        "explanation": "Correct sentence order communicates frequency and time clearly.",
+                    },
+                    {
+                        "qtype": "completion",
+                        "prompt": "Complete: 'When I get home, I first ___ my school uniform and then start homework.'",
+                        "correct": "change|change out of",
+                        "accepted": ["change", "change out of"],
+                        "explanation": "Both accepted answers fit the sentence naturally with routine meaning.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "guided_paragraph",
+                        "prompt": "Write 5-6 sentences describing your daily routine from morning to bedtime. Use at least two time connectors.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong paragraph has chronological order and clear connector use.",
+                    },
+                    {
+                        "qtype": "opinion_short",
+                        "prompt": "Should children help with house chores? Write 3-4 sentences and give one example.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The response should include an opinion and one concrete example.",
+                    },
+                    {
+                        "qtype": "picture_based_prompt",
+                        "prompt": "Imagine a picture of a family preparing dinner together. Write 3 sentences about each person's role.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Effective responses name roles and actions with clear sentence structure.",
+                    },
+                    {
+                        "qtype": "write_letter",
+                        "prompt": "Write a short message (5-6 sentences) to your cousin explaining your weekday routine and asking about theirs.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete message describes routine details and includes at least one question.",
+                    },
+                ],
+
+                "listening": [
+                    {
+                        "qtype": "dictation_sentence",
+                        "content": "[Transcript] We usually finish dinner at seven-thirty and review tomorrow's tasks together.",
+                        "prompt": "Write the sentence you hear.",
+                        "correct": "We usually finish dinner at seven-thirty and review tomorrow's tasks together.",
+                        "accepted": ["We usually finish dinner at seven-thirty and review tomorrow's tasks together.", "We usually finish dinner at seven-thirty and review tomorrow's tasks together"],
+                        "explanation": "The sentence combines routine time and a family planning action.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "[Transcript] My sister attends piano class on Mondays and Thursdays, while I play badminton on Tuesdays.",
+                        "prompt": "Which activity happens on Tuesdays?",
+                        "options": [("A", "Piano class", False), ("B", "Badminton", True), ("C", "Swimming", False), ("D", "Art club", False)],
+                        "correct": "B",
+                        "explanation": "The speaker says they play badminton on Tuesdays.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Could you please set the table while I prepare the soup?",
+                        "prompt": "What is the speaker doing?",
+                        "options": [("A", "Making a polite request", True), ("B", "Giving weather news", False), ("C", "Inviting someone to travel", False), ("D", "Introducing a classmate", False)],
+                        "correct": "A",
+                        "explanation": "The phrase 'Could you please...' signals a polite request.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] After school, I rest for twenty minutes, then I complete math homework before dinner.",
+                        "prompt": "Which subject is mentioned?",
+                        "options": [("A", "Science", False), ("B", "Math", True), ("C", "History", False), ("D", "Geography", False)],
+                        "correct": "B",
+                        "explanation": "The speaker says they complete math homework.",
+                    },
+                    {
+                        "qtype": "missing_word",
+                        "content": "[Transcript] Every evening, my father ___ the plants in our garden.",
+                        "prompt": "Write the missing word.",
+                        "correct": "waters",
+                        "accepted": ["waters"],
+                        "explanation": "With 'my father' in present simple, the verb is 'waters'.",
+                    },
+                    {
+                        "qtype": "short_response",
+                        "content": "[Transcript] We divide chores every Sunday so everyone knows their responsibilities for the week.",
+                        "prompt": "Why does the family divide chores on Sunday?",
+                        "correct": "so everyone knows responsibilities|to know responsibilities for the week",
+                        "accepted": ["so everyone knows responsibilities", "to know responsibilities for the week"],
+                        "explanation": "The speaker explains this helps everyone know weekly responsibilities.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "[Transcript] On Fridays, my mother picks me up because my club ends late.",
+                        "prompt": "The club ends early on Fridays.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "The speaker says the club ends late, not early.",
+                    },
+                    {
+                        "qtype": "dictation_word",
+                        "content": "[Transcript] My grandparents always give useful ___ when I feel stressed.",
+                        "prompt": "Write the missing word.",
+                        "correct": "advice",
+                        "accepted": ["advice"],
+                        "explanation": "The noun 'advice' matches the meaning of helpful guidance.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] I check my school bag every night to make sure I have books, pens, and my assignment notebook.",
+                        "prompt": "What is checked every night?",
+                        "options": [("A", "Lunch box", False), ("B", "School bag", True), ("C", "Bike", False), ("D", "Uniform shoes", False)],
+                        "correct": "B",
+                        "explanation": "The speaker clearly states they check their school bag each night.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Let's set a study plan together so we can finish our project on time.",
+                        "prompt": "What is the speaker trying to do?",
+                        "options": [("A", "Blame a classmate", False), ("B", "Suggest planning cooperation", True), ("C", "Cancel the project", False), ("D", "Change schools", False)],
+                        "correct": "B",
+                        "explanation": "The speaker suggests working together with a study plan.",
+                    },
+                ],
+
+                "speaking": [
+                    {
+                        "qtype": "topic_prompt",
+                        "prompt": "Describe your weekday routine from morning to evening in 40-50 seconds.",
+                        "speaking_topic": "Weekday routine timeline.",
+                        "instruction": "Include at least four actions and two time expressions.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete response should be chronological and include clear routine details.",
+                    },
+                    {
+                        "qtype": "role_play_response",
+                        "prompt": "Role play: Your parent asks you to help with chores while you have homework. Respond politely and suggest a plan.",
+                        "speaking_topic": "Balancing chores and homework politely.",
+                        "instruction": "Use polite language and propose a sequence of actions.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong responses show respectful tone and practical planning.",
+                    },
+                    {
+                        "qtype": "describe_picture",
+                        "prompt": "Imagine a picture of siblings doing different chores at home. Describe who is doing what.",
+                        "speaking_topic": "Describe household chore roles in a family scene.",
+                        "instruction": "Speak for 30-40 seconds and mention at least three actions.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A quality answer includes people, actions, and clear present tense verbs.",
+                    },
+                    {
+                        "qtype": "read_aloud",
+                        "content": "After school, I rest for a short time, complete my assignments, and help my family prepare dinner before reviewing for the next day.",
+                        "prompt": "Read the sentence aloud clearly.",
+                        "speaking_topic": "Read-aloud: extended daily routine sentence.",
+                        "instruction": "Use natural pauses at commas.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Fluent phrasing and accurate word reading indicate good oral control.",
+                    },
+                    {
+                        "qtype": "short_opinion",
+                        "prompt": "Should students make a daily study plan? Give your opinion and one example.",
+                        "speaking_topic": "Opinion on using daily study plans.",
+                        "instruction": "Speak for about 30 seconds.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete response states a view and supports it with an example.",
+                    },
+                    {
+                        "qtype": "compare_two_items",
+                        "prompt": "Compare studying alone and studying with family support. Give one advantage of each.",
+                        "speaking_topic": "Compare independent study and family-supported study.",
+                        "instruction": "Use comparative language and clear transitions.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong answers present balanced comparison with two distinct advantages.",
+                    },
+                    {
+                        "qtype": "guided_speaking",
+                        "prompt": "Use these prompts: 1) After school I... 2) Then I... 3) Before bed I... 4) This helps me...",
+                        "speaking_topic": "Guided sequence for after-school routine.",
+                        "instruction": "Make four linked sentences.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A coherent response follows all prompts and shows logical sequence.",
+                    },
+                    {
+                        "qtype": "personal_response",
+                        "prompt": "Which family routine makes you feel most supported, and why?",
+                        "speaking_topic": "Personal reflection on supportive family routines.",
+                        "instruction": "Answer in 2-3 connected sentences.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A good response names one routine and provides a personal reason.",
+                    },
+                    {
+                        "qtype": "repeat_sentence",
+                        "content": "We share responsibilities at home so everyone has time to study and rest.",
+                        "prompt": "Listen and repeat the sentence.",
+                        "speaking_topic": "Repeat statement about shared responsibilities.",
+                        "instruction": "Repeat with clear pronunciation and stress on key words.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Accurate repetition should preserve key meaning words such as responsibilities, study, and rest.",
+                    },
+                    {
+                        "qtype": "sentence_building_oral",
+                        "prompt": "Say a sentence using: every / table / set / we / dinner / before / the",
+                        "speaking_topic": "Build a sentence about pre-dinner chores.",
+                        "correct": "We set the table before dinner every day.",
+                        "accepted": ["We set the table before dinner every day.", "We set the table before dinner every day"],
+                        "match_mode": "normalized",
+                        "explanation": "This word order produces a clear and grammatical statement about routine.",
+                    },
+                ],
+            },
+
+            # -- Unit 3: Food & Health ----------------------------------------
+            3: {
+                "reading": [
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "A balanced lunch often includes whole grains, protein, vegetables, and water. Nutrition teachers recommend this combination because it supports concentration during afternoon classes.",
+                        "prompt": "Why is a balanced lunch recommended?",
+                        "options": [("A", "It is cheaper than breakfast", False), ("B", "It supports concentration in class", True), ("C", "It removes all homework stress", False), ("D", "It replaces sleep", False)],
+                        "correct": "B",
+                        "explanation": "The passage says balanced meals help concentration in afternoon classes.",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "Tariq reduced sugary drinks and started carrying a water bottle. After two weeks, he felt less tired during sports practice.",
+                        "prompt": "Tariq felt more tired after drinking more water.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "The text states he felt less tired, not more tired.",
+                    },
+                    {
+                        "qtype": "fill_in_the_blank",
+                        "prompt": "Complete: Doctors advise teenagers to get enough ___ every night.",
+                        "correct": "sleep|rest",
+                        "accepted": ["sleep", "rest"],
+                        "explanation": "Both 'sleep' and 'rest' fit the health recommendation in context.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "detail_scan",
+                        "content": "Lina prepares fruit salad with apples, papaya, banana, and yogurt. She avoids extra sugar and keeps portions moderate.",
+                        "prompt": "Which ingredient provides dairy in Lina's salad?",
+                        "correct": "yogurt|yoghurt",
+                        "accepted": ["yogurt", "yoghurt"],
+                        "explanation": "Yogurt is the dairy ingredient listed in the salad.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "main_idea",
+                        "content": "Health is not only about food. Regular exercise, enough sleep, and stress management are also important. Students can improve well-being by building consistent habits.",
+                        "prompt": "What is the main idea?",
+                        "options": [("A", "Food is the only factor in health", False), ("B", "Health depends on several consistent habits", True), ("C", "Exercise is unnecessary for students", False), ("D", "Students should avoid all stress", False)],
+                        "correct": "B",
+                        "explanation": "The passage emphasizes multiple habits together, not food alone.",
+                    },
+                    {
+                        "qtype": "short_answer",
+                        "content": "Before exams, Mei changes her routine by sleeping earlier and reducing processed snacks. She says this helps her think more clearly.",
+                        "prompt": "What two changes does Mei make before exams?",
+                        "correct": "sleeping earlier and reducing processed snacks|sleep earlier and reduce processed snacks",
+                        "accepted": ["sleeping earlier and reducing processed snacks", "sleep earlier and reduce processed snacks"],
+                        "explanation": "Mei's two changes are earlier sleep and fewer processed snacks.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "reference_question",
+                        "content": "Ryan brings homemade lunch to school. It usually includes rice, vegetables, and grilled fish. This helps him avoid too much fried food.",
+                        "prompt": "What does 'This' refer to?",
+                        "correct": "bringing homemade lunch|his homemade lunch routine|bringing lunch from home",
+                        "accepted": ["bringing homemade lunch", "his homemade lunch routine", "bringing lunch from home"],
+                        "explanation": "'This' points to Ryan bringing homemade lunch.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "sequence_order",
+                        "prompt": "Order these healthy morning actions: A) Drink water  B) Wake up  C) Stretch for five minutes  D) Eat breakfast",
+                        "correct": "B, A, C, D",
+                        "accepted": ["B A C D", "B, A, C, D", "BACD"],
+                        "explanation": "A logical healthy order is waking up, hydrating, moving, then eating.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "synonym_match",
+                        "prompt": "Choose the closest synonym for 'nutritious'.",
+                        "options": [("A", "healthy", True), ("B", "spicy", False), ("C", "expensive", False), ("D", "frozen", False)],
+                        "correct": "A",
+                        "explanation": "In food context, 'nutritious' means healthy and beneficial for the body.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "Coach Mira advises her team to drink water before, during, and after training. She explains that hydration improves endurance and recovery.",
+                        "prompt": "What is Coach Mira's main recommendation?",
+                        "options": [("A", "Skip water during training", False), ("B", "Hydrate throughout training periods", True), ("C", "Only drink sweet beverages", False), ("D", "Avoid recovery routines", False)],
+                        "correct": "B",
+                        "explanation": "She specifically recommends drinking water before, during, and after training.",
+                    },
+                ],
+
+                "writing": [
+                    {
+                        "qtype": "guided_sentence",
+                        "prompt": "Write one sentence recommending a healthy snack for school and explain why.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A good sentence names a snack and gives a practical reason.",
+                    },
+                    {
+                        "qtype": "error_correction",
+                        "prompt": "Correct the sentence: 'Too much sugar are bad for your teeth.'",
+                        "correct": "Too much sugar is bad for your teeth.",
+                        "accepted": ["Too much sugar is bad for your teeth.", "Too much sugar is bad for your teeth"],
+                        "explanation": "'Sugar' is treated as singular here, so the correct verb is 'is'.",
+                    },
+                    {
+                        "qtype": "sentence_rewrite",
+                        "prompt": "Rewrite using 'because': 'I drink more water. I want to stay focused.'",
+                        "correct": "I drink more water because I want to stay focused.",
+                        "accepted": ["I drink more water because I want to stay focused.", "I drink more water because I want to stay focused"],
+                        "explanation": "Using 'because' correctly links action and reason.",
+                    },
+                    {
+                        "qtype": "transformation",
+                        "prompt": "Complete with same meaning: 'She avoids junk food.' -> 'Junk food ___ by her.'",
+                        "correct": "is avoided",
+                        "accepted": ["is avoided"],
+                        "explanation": "Passive form 'is avoided' keeps the original meaning.",
+                    },
+                    {
+                        "qtype": "ordering_words",
+                        "prompt": "Arrange: every / stretch / minutes / we / for / morning / ten",
+                        "correct": "We stretch for ten minutes every morning.",
+                        "accepted": ["We stretch for ten minutes every morning.", "We stretch for ten minutes every morning"],
+                        "explanation": "Correct word order creates a clear habitual-action sentence.",
+                    },
+                    {
+                        "qtype": "completion",
+                        "prompt": "Complete: 'To stay healthy, students should eat more vegetables and ___ sugary drinks.'",
+                        "correct": "limit|reduce|avoid",
+                        "accepted": ["limit", "reduce", "avoid"],
+                        "explanation": "All accepted verbs express reducing unhealthy drink intake.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "guided_paragraph",
+                        "prompt": "Write 5-6 sentences about your weekly health routine. Include food, sleep, and exercise habits.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete paragraph should mention all three health dimensions with clear details.",
+                    },
+                    {
+                        "qtype": "opinion_short",
+                        "prompt": "Should schools ban sugary drinks? Write 3-4 sentences and include one supporting reason.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong response states a clear position and gives a reason linked to student health.",
+                    },
+                    {
+                        "qtype": "picture_based_prompt",
+                        "prompt": "Imagine a picture of students exercising in a park. Write 3 sentences about what they are doing and why it is beneficial.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Effective writing connects observed actions to specific health benefits.",
+                    },
+                    {
+                        "qtype": "write_letter",
+                        "prompt": "Write a short letter (5-6 sentences) to a friend giving advice on healthier study-week habits.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete letter includes practical advice and polite supportive tone.",
+                    },
+                ],
+
+                "listening": [
+                    {
+                        "qtype": "dictation_sentence",
+                        "content": "[Transcript] Drinking water regularly helps your brain stay alert during long lessons.",
+                        "prompt": "Write the sentence you hear.",
+                        "correct": "Drinking water regularly helps your brain stay alert during long lessons.",
+                        "accepted": ["Drinking water regularly helps your brain stay alert during long lessons.", "Drinking water regularly helps your brain stay alert during long lessons"],
+                        "explanation": "The sentence links hydration with attention and cognitive readiness.",
+                    },
+                    {
+                        "qtype": "multiple_choice",
+                        "content": "[Transcript] Nutrition club meets every Wednesday to discuss healthy lunch ideas and simple recipes.",
+                        "prompt": "When does the nutrition club meet?",
+                        "options": [("A", "Monday", False), ("B", "Wednesday", True), ("C", "Friday", False), ("D", "Sunday", False)],
+                        "correct": "B",
+                        "explanation": "The speaker states the meeting happens every Wednesday.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Please pack fruit instead of chips tomorrow so we can compare healthy snack energy levels.",
+                        "prompt": "What is the speaker trying to do?",
+                        "options": [("A", "Request a healthy choice for an activity", True), ("B", "Cancel tomorrow's class", False), ("C", "Sell fruit in school", False), ("D", "Punish students", False)],
+                        "correct": "A",
+                        "explanation": "The speaker politely requests fruit for a planned healthy comparison activity.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] I sleep at 9:30 on school nights, and I feel more energetic in morning classes.",
+                        "prompt": "What bedtime does the speaker mention?",
+                        "options": [("A", "8:30", False), ("B", "9:30", True), ("C", "10:30", False), ("D", "11:30", False)],
+                        "correct": "B",
+                        "explanation": "The speaker explicitly says 9:30 on school nights.",
+                    },
+                    {
+                        "qtype": "missing_word",
+                        "content": "[Transcript] We should wash our hands before eating to stop ___ from spreading.",
+                        "prompt": "Write the missing word.",
+                        "correct": "germs",
+                        "accepted": ["germs"],
+                        "explanation": "The common hygiene phrase is 'stop germs from spreading'.",
+                    },
+                    {
+                        "qtype": "short_response",
+                        "content": "[Transcript] Coach says we need protein after training so our muscles can recover better.",
+                        "prompt": "Why does Coach recommend protein after training?",
+                        "correct": "for muscle recovery|so muscles recover better|to recover muscles",
+                        "accepted": ["for muscle recovery", "so muscles recover better", "to recover muscles"],
+                        "explanation": "The transcript gives recovery as the reason for protein intake.",
+                        "match_mode": "multi_accepted",
+                    },
+                    {
+                        "qtype": "true_false",
+                        "content": "[Transcript] The school nurse advises students to bring reusable water bottles every day.",
+                        "prompt": "The nurse advises students to avoid water bottles.",
+                        "options": [("A", "True", False), ("B", "False", True)],
+                        "correct": "B",
+                        "explanation": "The nurse advises bringing water bottles, not avoiding them.",
+                    },
+                    {
+                        "qtype": "dictation_word",
+                        "content": "[Transcript] Eating too fast can affect your ___ and digestion.",
+                        "prompt": "Write the missing word.",
+                        "correct": "focus",
+                        "accepted": ["focus"],
+                        "explanation": "The transcript links eating speed with focus and digestion.",
+                    },
+                    {
+                        "qtype": "detail_identification",
+                        "content": "[Transcript] For lunch, I choose brown rice, grilled chicken, and steamed vegetables.",
+                        "prompt": "Which cooking style is used for the chicken?",
+                        "options": [("A", "Fried", False), ("B", "Grilled", True), ("C", "Boiled", False), ("D", "Raw", False)],
+                        "correct": "B",
+                        "explanation": "The transcript says 'grilled chicken'.",
+                    },
+                    {
+                        "qtype": "speaker_intent",
+                        "content": "[Transcript] Let's choose one healthy habit this week and check our progress on Friday.",
+                        "prompt": "What is the speaker proposing?",
+                        "options": [("A", "A weekly habit challenge", True), ("B", "A food sale", False), ("C", "A holiday trip", False), ("D", "A class cancellation", False)],
+                        "correct": "A",
+                        "explanation": "The speaker proposes selecting one habit and tracking progress during the week.",
+                    },
+                ],
+
+                "speaking": [
+                    {
+                        "qtype": "topic_prompt",
+                        "prompt": "Speak for 40-50 seconds about one healthy habit you recently improved and its impact.",
+                        "speaking_topic": "Personal healthy-habit improvement story.",
+                        "instruction": "Mention what changed, why you changed it, and one result.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong responses include a specific change, purpose, and outcome.",
+                    },
+                    {
+                        "qtype": "role_play_response",
+                        "prompt": "Role play: Your friend wants to skip breakfast before an exam. Give polite advice and suggest a better plan.",
+                        "speaking_topic": "Advising a friend about exam-day breakfast.",
+                        "instruction": "Use persuasive but friendly language.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A quality response gives practical, health-based advice with clear reasoning.",
+                    },
+                    {
+                        "qtype": "describe_picture",
+                        "prompt": "Imagine a picture of a school canteen with healthy and unhealthy food choices. Describe what students should choose and why.",
+                        "speaking_topic": "Describe healthy choices in a school canteen scene.",
+                        "instruction": "Speak for 35-45 seconds and justify two choices.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Good responses identify options and connect choices to health outcomes.",
+                    },
+                    {
+                        "qtype": "read_aloud",
+                        "content": "Regular sleep, balanced meals, and daily movement help students maintain concentration, reduce stress, and improve overall academic performance.",
+                        "prompt": "Read the sentence aloud.",
+                        "speaking_topic": "Read-aloud: integrated health and study-performance statement.",
+                        "instruction": "Use clear pronunciation of academic words such as concentration and performance.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Accurate reading of multi-clause sentence shows improved oral fluency.",
+                    },
+                    {
+                        "qtype": "short_opinion",
+                        "prompt": "Do you agree that schools should teach nutrition as a separate subject? Explain briefly.",
+                        "speaking_topic": "Opinion on nutrition as a school subject.",
+                        "instruction": "Give one claim and one supporting reason.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A complete response includes clear position and rationale tied to student life.",
+                    },
+                    {
+                        "qtype": "compare_two_items",
+                        "prompt": "Compare home-cooked meals and fast food in terms of nutrition and long-term health.",
+                        "speaking_topic": "Compare home-cooked food and fast food.",
+                        "instruction": "State one similarity and at least one key difference.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Strong answers balance both items while highlighting nutritional differences.",
+                    },
+                    {
+                        "qtype": "guided_speaking",
+                        "prompt": "Use this structure: 1) I used to... 2) Now I... 3) This change helps me...",
+                        "speaking_topic": "Habit change using before-and-after structure.",
+                        "instruction": "Speak in connected sentences with clear transition markers.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "The response should show contrast between old and new habits with a result.",
+                    },
+                    {
+                        "qtype": "personal_response",
+                        "prompt": "What is one health challenge students your age face, and what realistic solution would you suggest?",
+                        "speaking_topic": "Student health challenge and practical solution.",
+                        "instruction": "Answer in 2-4 sentences.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "A strong response identifies a relevant challenge and offers actionable advice.",
+                    },
+                    {
+                        "qtype": "repeat_sentence",
+                        "content": "If we plan our meals and sleep schedule, we can improve both health and school performance.",
+                        "prompt": "Listen and repeat.",
+                        "speaking_topic": "Repeat sentence connecting planning, health, and performance.",
+                        "instruction": "Repeat with clear phrase grouping.",
+                        "accepted": [],
+                        "match_mode": "ai_graded",
+                        "explanation": "Precise repetition preserves both condition and result in the sentence.",
+                    },
+                    {
+                        "qtype": "sentence_building_oral",
+                        "prompt": "Say a sentence using: enough / helps / think / us / sleep / clearly",
+                        "speaking_topic": "Sentence building about sleep and thinking clearly.",
+                        "correct": "Enough sleep helps us think clearly.",
+                        "accepted": ["Enough sleep helps us think clearly.", "Enough sleep helps us think clearly"],
+                        "match_mode": "normalized",
+                        "explanation": "Correct order forms a clear cause-and-effect statement.",
+                    },
+                ],
+            },
+        },  # end A1 intermediate
+
+        # ### EXPAND ### - Add A2 through C2 entries for intermediate.
+        # "A2": { 1: {...}, 2: {...}, 3: {...} },
+
+    },  # end intermediate
+
+    # ### EXPAND ### - Add advanced tier here.
     # "advanced":     { "A1": {...}, ... },
 }
+
+
+# ---------------------------------------------------------------------------
+# DERIVED BANK BUILDERS (centralized, ordered, reusable)
+# ---------------------------------------------------------------------------
+
+DERIVATION_PLAN = {
+    # Populate levels progressively from A1 baseline for each tier.
+    "beginner": ["A2", "B1", "B2", "C1", "C2"],
+    "intermediate": ["A2", "B1", "B2", "C1", "C2"],
+    "advanced": ["A2", "B1", "B2", "C1", "C2"],
+}
+
+LEVEL_COMPLEXITY_NOTE = {
+    "A1": "simple personal and familiar contexts",
+    "A2": "practical exchanges with clearer details and reasons",
+    "B1": "connected ideas, brief reasoning, and contextual precision",
+    "B2": "multi-step reasoning, comparison, and clearer abstraction",
+    "C1": "nuanced argument, register control, and coherent synthesis",
+    "C2": "precise stance, subtle meaning, and advanced discourse flexibility",
+}
+
+TIER_RIGOR_NOTE = {
+    "beginner": "Use straightforward, concrete language suitable for foundational learners.",
+    "intermediate": "Use moderately richer vocabulary and clearer multi-step responses.",
+    "advanced": "Use higher precision, stronger reasoning, and more deliberate discourse control.",
+}
+
+
+def _promote_question(tier_code, target_level_code, unit_order, skill_code, qdata):
+    """Promote one question to a harder tier/level while preserving schema shape."""
+    item = copy.deepcopy(qdata)
+
+    target_topic = SUBLEVEL_TOPICS[target_level_code][unit_order - 1]
+    prompt = item.get("prompt", "")
+    explanation = item.get("explanation", "")
+    level_note = LEVEL_COMPLEXITY_NOTE.get(target_level_code, "clear contextual communication")
+    tier_note = TIER_RIGOR_NOTE.get(tier_code, "Use clear and accurate language.")
+
+    if skill_code == "reading":
+        item["prompt"] = (
+            f"{prompt} Respond for a {target_topic.lower()} context and justify using textual clues."
+        )
+        if item.get("content"):
+            item["content"] = f"{item['content']} Context focus: {target_topic}."
+        item["explanation"] = (
+            f"{explanation} This fits {target_level_code} because it requires {level_note}."
+        ).strip()
+
+    elif skill_code == "writing":
+        item["prompt"] = f"{prompt} Keep ideas coherent and relevant to {target_topic.lower()}."
+        item["explanation"] = (
+            f"{explanation} {tier_note} For {target_level_code}, organize response and add clear support."
+        ).strip()
+        if item.get("match_mode") == "ai_graded":
+            base_instruction = item.get("instruction", "Write in complete, connected sentences.")
+            item["instruction"] = f"{base_instruction} Include one specific detail linked to the topic."
+
+    elif skill_code == "listening":
+        item["prompt"] = (
+            f"{prompt} Focus on practical details and speaker purpose for {target_topic.lower()}."
+        )
+        if item.get("content"):
+            item["content"] = f"{item['content']} Listening context: {target_topic}."
+        item["explanation"] = (
+            f"{explanation} Correct answers depend on detail selection and context interpretation."
+        ).strip()
+
+    elif skill_code == "speaking":
+        item["prompt"] = (
+            f"{prompt} Include one example relevant to {target_topic.lower()} and one linking expression."
+        )
+        item["speaking_topic"] = item.get("speaking_topic") or f"{target_topic} speaking prompt"
+        base_instruction = item.get("instruction", "Speak clearly and organize your ideas.")
+        item["instruction"] = f"{base_instruction} Keep your response relevant to {target_topic}."
+        item["explanation"] = (
+            f"{explanation} Strong speaking includes relevance, coherence, and clear support."
+        ).strip()
+
+    return item
+
+
+def _build_level_from_previous(tier_code, source_bank, target_level_code):
+    target = {}
+    for unit_order, skills_data in source_bank.items():
+        target[unit_order] = {}
+        for skill_code, questions in skills_data.items():
+            target[unit_order][skill_code] = [
+                _promote_question(tier_code, target_level_code, unit_order, skill_code, qdata)
+                for qdata in questions
+            ]
+    return target
+
+
+def _ensure_progressive_levels_for_tier(tier_code):
+    tier_bank = QUESTION_BANK.get(tier_code)
+    if not tier_bank or "A1" not in tier_bank:
+        return
+
+    previous_level = "A1"
+    for target_level in DERIVATION_PLAN.get(tier_code, []):
+        if target_level not in tier_bank:
+            tier_bank[target_level] = _build_level_from_previous(
+                tier_code=tier_code,
+                source_bank=tier_bank[previous_level],
+                target_level_code=target_level,
+            )
+        previous_level = target_level
+
+
+def _ensure_advanced_a1_baseline():
+    """Guarantee advanced A1 exists before deriving higher CEFR levels."""
+    if "advanced" in QUESTION_BANK and "A1" in QUESTION_BANK["advanced"]:
+        return
+    if "intermediate" not in QUESTION_BANK or "A1" not in QUESTION_BANK["intermediate"]:
+        return
+
+    QUESTION_BANK.setdefault("advanced", {})
+    QUESTION_BANK["advanced"]["A1"] = _build_level_from_previous(
+        tier_code="advanced",
+        source_bank=QUESTION_BANK["intermediate"]["A1"],
+        target_level_code="A1",
+    )
+
+
+# Ensure a clean, predictable bank shape for all currently populated tiers.
+_ensure_advanced_a1_baseline()
+for _tier in ("beginner", "intermediate", "advanced"):
+    _ensure_progressive_levels_for_tier(_tier)
 
 
 # ---------------------------------------------------------------------------
@@ -1248,6 +2464,40 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write(self.style.MIGRATE_HEADING("Seeding structured CEFR curriculum..."))
 
+        # Validate authored content shape before touching DB rows.
+        self._validate_question_bank_structure()
+
+        # Migration-compatibility switches (0003 runs before 0004 on fresh DBs).
+        question_columns = {
+            c.name for c in connection.introspection.get_table_description(
+                connection.cursor(),
+                Question._meta.db_table,
+            )
+        }
+        table_names = set(connection.introspection.table_names())
+        self._supports_difficulty_tier = (
+            DifficultyTier._meta.db_table in table_names and
+            'difficulty_tier_id' in question_columns
+        )
+        self._supports_accepted_answers = 'accepted_answers' in question_columns
+        self._supports_speaking_topic = 'speaking_topic' in question_columns
+        self._supports_matching_mode = 'answer_matching_mode' in question_columns
+        self._supports_case_sensitive = 'is_case_sensitive' in question_columns
+
+        # Migration 0003 runs before 0004 on fresh DBs. In that state, the
+        # Question ORM model contains fields that do not yet exist in SQL schema.
+        # To prevent migration-time crashes, seed only taxonomy/sublevels here and
+        # let full question seeding run again once 0004+ schema is available.
+        if not self._supports_accepted_answers:
+            level_objs = self._seed_levels()
+            self._seed_skills()
+            self._seed_question_types()
+            self._ensure_all_sublevels(level_objs)
+            self.stdout.write(self.style.WARNING(
+                "Pre-0004 schema detected. Skipped v2 question bank seeding for migration compatibility."
+            ))
+            return
+
         # 1. Core taxonomy
         tier_objs  = self._seed_tiers()
         level_objs = self._seed_levels()
@@ -1257,7 +2507,7 @@ class Command(BaseCommand):
         # 2. Sublevels, topics, and questions from bank
         total = 0
         for tier_code, levels in QUESTION_BANK.items():
-            tier = tier_objs[tier_code]
+            tier = tier_objs.get(tier_code)
             for level_code, units in levels.items():
                 level = level_objs[level_code]
                 for unit_order, skills_data in units.items():
@@ -1283,6 +2533,9 @@ class Command(BaseCommand):
     # ---- private helpers ---------------------------------------------------
 
     def _seed_tiers(self):
+        if not getattr(self, '_supports_difficulty_tier', False):
+            return {}
+
         objs = {}
         for t in TIERS:
             obj, _ = DifficultyTier.objects.update_or_create(
@@ -1364,16 +2617,28 @@ class Command(BaseCommand):
                 self._ensure_sublevel(level, topic_name, unit_order)
 
     def _seed_question(self, tier, level, sublevel, skill, topic, qtype_objs, qdata, unit_order, idx):
+        self._validate_single_question_payload(
+            tier_code=tier.code if tier else "beginner",
+            level_code=level.code,
+            unit_order=unit_order,
+            skill_code=skill.code,
+            qdata=qdata,
+        )
+
+        # Keep per-question topic explicit for frontend/export consistency.
+        qdata = dict(qdata)
+        qdata.setdefault("topic", topic.name)
+        if skill.code == "speaking" and not qdata.get("speaking_topic"):
+            qdata["speaking_topic"] = qdata["prompt"]
+
         qtype = qtype_objs.get(qdata["qtype"])
         if not qtype:
             self.stdout.write(self.style.WARNING(f"  Unknown qtype '{qdata['qtype']}' - skipping."))
             return 0
 
         # Deterministic, human-readable question ID
-        qid = (
-            f"{tier.code[:3].upper()}-{level.code}-U{unit_order:02d}"
-            f"-{skill.code[:4].upper()}-{idx:02d}"
-        )
+        tier_prefix = tier.code[:3].upper() if tier else 'GEN'
+        qid = f"{tier_prefix}-{level.code}-U{unit_order:02d}-{skill.code[:4].upper()}-{idx:02d}"
 
         correct_str  = qdata.get("correct", "")
         accepted_raw = list(qdata.get("accepted", []))
@@ -1387,30 +2652,38 @@ class Command(BaseCommand):
         if match_mode == "ai_graded":
             accepted_raw = []
 
+        defaults = {
+            "cefr_level":            level,
+            "sublevel":              sublevel,
+            "skill":                 skill,
+            "question_type":         qtype,
+            "topic":                 topic,
+            "title":                 f"{sublevel.code} {skill.name} {idx} - {topic.name}",
+            "instruction_text":      qdata.get("instruction", ""),
+            "content_text":          qdata.get("content", ""),
+            "question_text":         qdata["prompt"],
+            "correct_answer":        correct_str,
+            "sample_answer":         "",    # no longer used; AnswerSample rows are canonical
+            "explanation":           qdata.get("explanation", ""),
+            "difficulty":            max(1, min(3, (level.order // 2) + 1)),
+            "points":               2 if skill.code in ("writing", "speaking") else 1,
+            "is_active":             True,
+        }
+
+        if self._supports_difficulty_tier:
+            defaults["difficulty_tier"] = tier
+        if self._supports_accepted_answers:
+            defaults["accepted_answers"] = accepted_raw
+        if self._supports_speaking_topic:
+            defaults["speaking_topic"] = qdata.get("speaking_topic", "")
+        if self._supports_matching_mode:
+            defaults["answer_matching_mode"] = match_mode
+        if self._supports_case_sensitive:
+            defaults["is_case_sensitive"] = False
+
         question, _ = Question.objects.update_or_create(
             question_id=qid,
-            defaults={
-                "difficulty_tier":       tier,
-                "cefr_level":            level,
-                "sublevel":              sublevel,
-                "skill":                 skill,
-                "question_type":         qtype,
-                "topic":                 topic,
-                "title":                 f"{sublevel.code} {skill.name} {idx} - {topic.name}",
-                "instruction_text":      qdata.get("instruction", ""),
-                "content_text":          qdata.get("content", ""),
-                "question_text":         qdata["prompt"],
-                "correct_answer":        correct_str,
-                "accepted_answers":      accepted_raw,
-                "sample_answer":         "",    # no longer used; AnswerSample rows are canonical
-                "explanation":           qdata.get("explanation", ""),
-                "speaking_topic":        qdata.get("speaking_topic", ""),
-                "answer_matching_mode":  match_mode,
-                "is_case_sensitive":     False,
-                "difficulty":            max(1, min(3, (level.order // 2) + 1)),
-                "points":               2 if skill.code in ("writing", "speaking") else 1,
-                "is_active":             True,
-            },
+            defaults=defaults,
         )
 
         # MCQ / True-False options
@@ -1438,3 +2711,74 @@ class Command(BaseCommand):
             ])
 
         return 1
+
+    def _validate_question_bank_structure(self):
+        """Validate content structure and pedagogical consistency.
+
+        Rules checked:
+          - 10 questions per sublevel+skill
+          - required fields exist
+          - each question has correct or accepted answers
+          - speaking questions always include speaking_topic
+          - minimum qtype variety per skill set
+          - tier and CEFR codes are known
+        """
+        for tier_code, levels in QUESTION_BANK.items():
+            if tier_code not in TIER_COMPLEXITY_ORDER:
+                raise CommandError(f"Unknown tier '{tier_code}' in QUESTION_BANK")
+
+            for level_code, units in levels.items():
+                if level_code not in CEFR_COMPLEXITY_GUIDE:
+                    raise CommandError(f"Unknown CEFR level '{level_code}' in QUESTION_BANK")
+
+                expected_units = SUBLEVEL_TOPICS.get(level_code, [])
+                for unit_order, skills_data in units.items():
+                    if unit_order < 1 or unit_order > len(expected_units):
+                        raise CommandError(
+                            f"Invalid unit_order {unit_order} for {tier_code}/{level_code}; "
+                            f"expected 1..{len(expected_units)}"
+                        )
+
+                    for skill_code, questions in skills_data.items():
+                        if len(questions) != self.QUESTIONS_PER_SKILL:
+                            raise CommandError(
+                                f"{tier_code}/{level_code}.{unit_order}/{skill_code} has {len(questions)} "
+                                f"questions; expected {self.QUESTIONS_PER_SKILL}"
+                            )
+
+                        qtypes = set()
+                        for qdata in questions:
+                            self._validate_single_question_payload(
+                                tier_code=tier_code,
+                                level_code=level_code,
+                                unit_order=unit_order,
+                                skill_code=skill_code,
+                                qdata=qdata,
+                            )
+                            qtypes.add(qdata["qtype"])
+
+                        min_variety = SKILL_MIN_VARIETY.get(skill_code, 4)
+                        if len(qtypes) < min_variety:
+                            raise CommandError(
+                                f"{tier_code}/{level_code}.{unit_order}/{skill_code} has {len(qtypes)} unique qtypes; "
+                                f"minimum required is {min_variety}"
+                            )
+
+    def _validate_single_question_payload(self, tier_code, level_code, unit_order, skill_code, qdata):
+        prefix = f"{tier_code}/{level_code}.{unit_order}/{skill_code}"
+
+        for key in REQUIRED_QUESTION_KEYS:
+            if key not in qdata or not str(qdata.get(key, "")).strip():
+                raise CommandError(f"{prefix}: missing required key '{key}'")
+
+        has_correct = bool(str(qdata.get("correct", "")).strip())
+        has_accepted_key = "accepted" in qdata
+        if not has_correct and not has_accepted_key:
+            raise CommandError(
+                f"{prefix}: each question must include 'correct' or 'accepted'"
+            )
+
+        if skill_code == "speaking" and not str(qdata.get("speaking_topic", "")).strip():
+            raise CommandError(
+                f"{prefix}: speaking question missing non-empty 'speaking_topic'"
+            )

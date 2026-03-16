@@ -248,6 +248,7 @@ class StartSessionView(View):
         level = data.get('starting_level', 'A1')
         sublevel_code = data.get('starting_sublevel')
         skill_code = data.get('skill')
+        difficulty_tier = data.get('difficulty_tier')
         session_type = data.get('session_type', 'practice')
 
         candidate, _ = Candidate.objects.get_or_create(
@@ -259,6 +260,7 @@ class StartSessionView(View):
                 candidate, starting_level_code=level,
                 skill_code=skill_code, session_type=session_type,
                 starting_sublevel_code=sublevel_code,
+                difficulty_tier_code=difficulty_tier,
             )
         except Exception as e:
             return _json_error(str(e))
@@ -273,6 +275,7 @@ class StartSessionView(View):
             'starting_level': level,
             'starting_sublevel': engine.current_sublevel.code if engine.current_sublevel else None,
             'skill': skill_code or 'all',
+            'difficulty_tier': difficulty_tier,
             'session_type': session_type,
             'progress': progress,
         })
@@ -302,6 +305,10 @@ class NextQuestionView(View):
             })
 
         progress = engine.get_progress()
+        instruction = question.instruction_text or question.question_type.instruction_template
+        if skill_code == 'speaking' and not instruction:
+            instruction = 'Speak clearly and stay on topic.'
+
         data = {
             'finished': False,
             'question_id': question.question_id,
@@ -310,7 +317,7 @@ class NextQuestionView(View):
             'sublevel': question.sublevel.code if question.sublevel else None,
             'skill': question.skill.code,
             'question_type': question.question_type.code,
-            'instruction': question.instruction_text or question.question_type.instruction_template,
+            'instruction': instruction,
             'content': question.content_text,
             'question': question.question_text,
             'media_url': question.media_url,
@@ -354,9 +361,10 @@ class NextQuestionView(View):
         elif skill_code == 'speaking':
             data['requires_microphone'] = True
 
-            # Always include speaking_topic for speaking questions
-            if skill_code == 'speaking':
-                data['speaking_topic'] = question.speaking_topic or question.question_text
+        # Always include speaking_topic for speaking questions (all speaking types)
+        if skill_code == 'speaking':
+            data['speaking_topic'] = question.speaking_topic or question.question_text or question.title
+            data['response_expectation'] = 'audio'
 
         fmt = question.question_type.response_format
         if fmt in ('single_choice', 'true_false'):

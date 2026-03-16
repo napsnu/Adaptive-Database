@@ -58,11 +58,13 @@ class AdaptiveEngine:
     MAX_RETRIES = 1         # max retries per skill (2 attempts total)
 
     def __init__(self, candidate, starting_level_code='A1', skill_code=None,
-                 session_type='practice', starting_sublevel_code=None):
+                 session_type='practice', starting_sublevel_code=None,
+                 difficulty_tier_code=None):
         self.candidate = candidate
         self.starting_level = CEFRLevel.objects.get(code=starting_level_code)
         self.current_level = self.starting_level
         self.current_sublevel = self._resolve_starting_sublevel(starting_sublevel_code)
+        self.difficulty_tier_code = difficulty_tier_code
         self.session_type = session_type
         self.questions_per_skill = (
             self.SUBLEVEL_QUESTIONS_PER_SKILL if self.current_sublevel else self.QUESTIONS_PER_SKILL
@@ -81,11 +83,21 @@ class AdaptiveEngine:
         self.total_max_score = 0.0
         self.used_question_ids = set()
 
+        # Per-skill attempt queue state (5 of 10 style delivery)
+        self._current_skill_question_queue = []
+        self._current_skill_target_count = self.questions_per_skill
+        self._last_skill_attempt_pool_ids = {}
+
+        # Per-question state (max 2 attempts per question)
+        self._current_question_id = None
+        self._pending_retry_question_id = None
+        self._question_attempt_counts = {}
+
         # Hierarchical tracking
         self._current_skill_index = 0
         self._current_skill_correct = 0
         self._current_skill_count = 0
-        self._current_skill_attempt = 1  # which attempt (1, 2, or 3)
+        self._current_skill_attempt = 1  # which attempt (1 or 2)
 
         # Track passed/failed skills
         self._skill_results = {}  # {skill_code: {'passed': bool, 'attempts': int, 'scores': []}}
@@ -140,7 +152,11 @@ class AdaptiveEngine:
         return False
 
     def get_next_question(self):
-        """Select the next question from the current skill at the current level."""
+        """Return the next question in the current preselected skill queue.
+
+        The queue is sampled once per skill-attempt to avoid duplicates in the same
+        attempt and to reduce immediate repetition on retries where possible.
+        """
         if self.is_finished():
             return None
 
@@ -149,38 +165,90 @@ class AdaptiveEngine:
             self._finished = True
             return None
 
+        # Wrong first attempt on the same question -> repeat this exact question.
+        if self._pending_retry_question_id:
+            try:
+                return Question.objects.get(id=self._pending_retry_question_id, is_active=True)
+            except Question.DoesNotExist:
+                self._pending_retry_question_id = None
+
+        # Build queue lazily at the start of each skill-attempt.
+        if not self._current_skill_question_queue:
+            self._current_skill_question_queue = self._build_skill_question_queue(skill_code)
+            self._current_skill_target_count = len(self._current_skill_question_queue)
+            if self._current_skill_target_count == 0:
+                # Safeguard: no pool for this skill/sublevel, skip to next skill.
+                self._advance_skill(forced=True)
+                return self.get_next_question() if not self.is_finished() else None
+
+        # Pop one unique question id from the queue.
+        next_qid = self._current_skill_question_queue.pop(0)
+        self._current_question_id = next_qid
+        return Question.objects.filter(id=next_qid, is_active=True).first()
+
+    def _build_skill_question_queue(self, skill_code):
+        """Preselect a random queue for this skill-attempt.
+
+        Target is 5 questions from the stored pool (usually 10). On retakes, avoid
+        immediate repetition from the prior attempt when possible.
+        """
         skill = Skill.objects.get(code=skill_code)
 
         base_qs = Question.objects.filter(
             cefr_level=self.current_level,
             skill=skill,
             is_active=True,
-        ).exclude(id__in=self.used_question_ids)
+            difficulty_tier__isnull=False,
+        )
+        if self.difficulty_tier_code:
+            base_qs = base_qs.filter(difficulty_tier__code=self.difficulty_tier_code)
 
         qs = base_qs
         if self.current_sublevel:
-            qs = qs.filter(sublevel=self.current_sublevel)
-            if not qs.exists():
-                # Backward compatibility for older banks that don't have sublevel assigned yet.
-                qs = base_qs
+            scoped = qs.filter(sublevel=self.current_sublevel)
+            if scoped.exists():
+                qs = scoped
 
-        all_qs = list(qs)
-        if all_qs:
-            return random.choice(all_qs)
+        all_ids = list(qs.values_list('id', flat=True))
+        if not all_ids:
+            return []
 
-        # No more questions available for this skill — skip to next
-        self._advance_skill(forced=True)
-        return self.get_next_question() if not self.is_finished() else None
+        target_count = min(self.questions_per_skill, len(all_ids))
+        unseen_ids = [qid for qid in all_ids if qid not in self.used_question_ids]
+
+        # Prefer unseen questions; fall back to seen ones only when pool is short.
+        if len(unseen_ids) >= target_count:
+            candidate_ids = unseen_ids
+        else:
+            candidate_ids = list(dict.fromkeys(unseen_ids + [qid for qid in all_ids if qid not in unseen_ids]))
+
+        previous_pool = self._last_skill_attempt_pool_ids.get(skill_code, set())
+        fresh_ids = [qid for qid in candidate_ids if qid not in previous_pool]
+
+        if len(fresh_ids) >= target_count:
+            selected = random.sample(fresh_ids, target_count)
+        else:
+            selected = list(fresh_ids)
+            remaining = [qid for qid in candidate_ids if qid not in selected]
+            if remaining:
+                selected.extend(random.sample(remaining, min(target_count - len(selected), len(remaining))))
+
+        random.shuffle(selected)
+        self._last_skill_attempt_pool_ids[skill_code] = set(selected)
+        return selected
 
     def submit_answer(self, question, selected_option_label=None,
                       response_text='', response_data=None,
                       audio_file_path='', manual_score=None):
-        """Submit and grade an answer."""
+        """Submit and grade an answer with max 2 attempts per question."""
         is_correct = None
         score = 0.0
         max_score = float(question.points)
         feedback = ''
         selected_option = None
+
+        attempt_no = self._question_attempt_counts.get(question.id, 0) + 1
+        self._question_attempt_counts[question.id] = attempt_no
 
         if question.skill.code == 'writing' and response_text.strip():
             is_correct, score, feedback, selected_option = self._grade_writing_with_samples(
@@ -230,51 +298,51 @@ class AdaptiveEngine:
             is_correct=bool(is_correct),
             score=score,
             max_score=max_score,
-            attempt_no=self._skill_results[self.current_skill_code]['attempts'] + 1,
+            attempt_no=attempt_no,
         )
 
-        progress_sublevel = question.sublevel or self.current_sublevel
-        if progress_sublevel:
-            progress_obj, _ = UserProgress.objects.get_or_create(
-                candidate=self.candidate,
-                cefr_level=question.cefr_level,
-                sublevel=progress_sublevel,
-                skill=question.skill,
-                defaults={'is_unlocked': True},
-            )
-            progress_obj.questions_answered += 1
+        question_finalized = bool(is_correct) or attempt_no >= 2
+        remaining_attempts = max(0, 2 - attempt_no)
+
+        if question_finalized:
+            self._pending_retry_question_id = None
+            self._current_question_id = None
+            self.used_question_ids.add(question.id)
+            self.total_questions += 1
+            self.total_score += score
+            self.total_max_score += max_score
             if is_correct:
-                progress_obj.correct_answers += 1
-            progress_obj.attempts += 1
-            progress_obj.mastery_score = round(
-                (progress_obj.correct_answers / progress_obj.questions_answered) * 100,
-                1,
-            ) if progress_obj.questions_answered > 0 else 0
-            progress_obj.is_completed = progress_obj.mastery_score >= 80.0
-            progress_obj.last_attempt_at = timezone.now()
-            progress_obj.save(update_fields=[
-                'questions_answered', 'correct_answers', 'attempts',
-                'mastery_score', 'is_completed', 'last_attempt_at',
-            ])
+                self.total_correct += 1
 
-        self.used_question_ids.add(question.id)
-        self.total_questions += 1
-        self.total_score += score
-        self.total_max_score += max_score
-        if is_correct:
-            self.total_correct += 1
+            # Skill-level tracking counts unique finalized questions, not attempts.
+            self._current_skill_count += 1
+            if is_correct:
+                self._current_skill_correct += 1
 
-        # Skill-level tracking
-        self._current_skill_count += 1
-        if is_correct:
-            self._current_skill_correct += 1
+            self._update_user_progress(
+                question=question,
+                is_correct=bool(is_correct),
+                attempts_used=attempt_no,
+            )
+        else:
+            # Wrong on first attempt -> re-ask same question.
+            self._pending_retry_question_id = question.id
 
         # Evaluate after configured number of questions per skill
         action = 'CONTINUE'
         skill_status = None
 
-        if self._current_skill_count >= self.questions_per_skill:
+        if question_finalized and self._current_skill_count >= self._current_skill_target_count:
             action, skill_status = self._evaluate_skill()
+        elif not question_finalized:
+            action = 'QUESTION_RETRY'
+            skill_status = {
+                'question_id': question.question_id,
+                'attempt': attempt_no,
+                'max_attempts': 2,
+                'remaining_attempts': remaining_attempts,
+                'message': 'Try the same question one more time.',
+            }
 
         result = {
             'question_id': question.question_id,
@@ -286,12 +354,16 @@ class AdaptiveEngine:
             'current_skill': self.current_skill_code,
             'action': action,
             'skill_status': skill_status,
-            'skill_progress': f"{self._current_skill_count}/{self.questions_per_skill}",
+            'skill_progress': f"{self._current_skill_count}/{self._current_skill_target_count}",
+            'question_attempt': attempt_no,
+            'question_max_attempts': 2,
+            'question_remaining_attempts': remaining_attempts,
             'skills_passed': [k for k, v in self._skill_results.items() if v['passed']],
             'skills_remaining': [k for k in self._skill_order[self._current_skill_index:]],
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
             'current_sublevel': self.current_sublevel.code if self.current_sublevel else None,
+            'difficulty_tier': self.difficulty_tier_code,
         }
         self._history.append(result)
 
@@ -308,6 +380,35 @@ class AdaptiveEngine:
         ])
 
         return result
+
+    def _update_user_progress(self, question, is_correct, attempts_used):
+        """Persist progress updates without resetting existing data."""
+        progress_sublevel = question.sublevel or self.current_sublevel
+        if not progress_sublevel:
+            return
+
+        progress_obj, _ = UserProgress.objects.get_or_create(
+            candidate=self.candidate,
+            cefr_level=question.cefr_level,
+            sublevel=progress_sublevel,
+            skill=question.skill,
+            defaults={'is_unlocked': True},
+        )
+        progress_obj.questions_answered += 1
+        if is_correct:
+            progress_obj.correct_answers += 1
+        progress_obj.attempts += max(1, attempts_used)
+        progress_obj.mastery_score = round(
+            (progress_obj.correct_answers / progress_obj.questions_answered) * 100,
+            1,
+        ) if progress_obj.questions_answered > 0 else 0.0
+        progress_obj.is_completed = progress_obj.mastery_score >= 80.0
+        progress_obj.is_unlocked = True
+        progress_obj.last_attempt_at = timezone.now()
+        progress_obj.save(update_fields=[
+            'questions_answered', 'correct_answers', 'attempts', 'mastery_score',
+            'is_completed', 'is_unlocked', 'last_attempt_at',
+        ])
 
     def _grade_writing_with_samples(self, question, response_text, max_score):
         """Grade writing using multiple acceptable samples via similarity + keyword overlap."""
@@ -360,12 +461,13 @@ class AdaptiveEngine:
         """Evaluate skill round and decide: pass → next skill, fail → retry."""
         correct = self._current_skill_correct
         skill_code = self.current_skill_code
-        pass_threshold = max(1, math.ceil(self.questions_per_skill * 0.8))
+        target = max(1, self._current_skill_target_count)
+        pass_threshold = max(1, math.ceil(target * 0.8))
 
         # Record this attempt
         self._skill_results[skill_code]['attempts'] += 1
         self._skill_results[skill_code]['scores'].append(
-            f"{correct}/{self.questions_per_skill}"
+            f"{correct}/{target}"
         )
 
         if correct >= pass_threshold:
@@ -375,7 +477,7 @@ class AdaptiveEngine:
             return 'SKILL_PASSED', {
                 'skill': skill_code,
                 'result': 'PASSED',
-                'score': f"{correct}/{self.questions_per_skill}",
+                'score': f"{correct}/{target}",
                 'next_skill': self.current_skill_code,
                 'message': f'Well done! You passed {skill_code.title()}.',
             }
@@ -387,7 +489,7 @@ class AdaptiveEngine:
                 return 'SKILL_FAILED_MAX_RETRIES', {
                     'skill': skill_code,
                     'result': 'FAILED',
-                    'score': f"{correct}/{self.questions_per_skill}",
+                    'score': f"{correct}/{target}",
                     'next_skill': self.current_skill_code,
                     'message': f'You did not pass {skill_code.title()} after {self.MAX_RETRIES + 1} attempts. Moving on.',
                 }
@@ -396,13 +498,17 @@ class AdaptiveEngine:
                 self._current_skill_attempt += 1
                 self._current_skill_correct = 0
                 self._current_skill_count = 0
+                self._current_skill_question_queue = []
+                self._current_skill_target_count = self.questions_per_skill
+                self._pending_retry_question_id = None
+                self._current_question_id = None
                 return 'SKILL_FAILED_RETRY', {
                     'skill': skill_code,
                     'result': 'RETRY',
-                    'score': f"{correct}/{self.questions_per_skill}",
+                    'score': f"{correct}/{target}",
                     'attempt': self._current_skill_attempt,
                     'max_attempts': self.MAX_RETRIES + 1,
-                    'message': f'You need {pass_threshold}/{self.questions_per_skill} to pass. Try {skill_code.title()} again! (Attempt {self._current_skill_attempt}/{self.MAX_RETRIES + 1})',
+                    'message': f'You need {pass_threshold}/{target} to pass. Try {skill_code.title()} again! (Attempt {self._current_skill_attempt}/{self.MAX_RETRIES + 1})',
                 }
 
     def _advance_skill(self, forced=False):
@@ -411,6 +517,10 @@ class AdaptiveEngine:
         self._current_skill_correct = 0
         self._current_skill_count = 0
         self._current_skill_attempt = 1
+        self._current_skill_question_queue = []
+        self._current_skill_target_count = self.questions_per_skill
+        self._pending_retry_question_id = None
+        self._current_question_id = None
 
         if self._current_skill_index >= len(self._skill_order):
             # All skills attempted — level assessment complete
@@ -424,7 +534,7 @@ class AdaptiveEngine:
             'current_skill_attempt': self._current_skill_attempt,
             'max_attempts': self.MAX_RETRIES + 1,
             'questions_in_skill': self._current_skill_count,
-            'questions_per_skill': self.questions_per_skill,
+            'questions_per_skill': self._current_skill_target_count,
             'skill_order': self._skill_order,
             'skills_passed': [k for k, v in self._skill_results.items() if v['passed']],
             'skills_failed': [k for k, v in self._skill_results.items()
@@ -433,6 +543,7 @@ class AdaptiveEngine:
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
             'current_sublevel': self.current_sublevel.code if self.current_sublevel else None,
+            'difficulty_tier': self.difficulty_tier_code,
         }
 
     LEVEL_PASS_PERCENTAGE = 80.0  # >= 80% overall score to unlock next level
@@ -456,12 +567,13 @@ class AdaptiveEngine:
         # Level passes if overall score >= 80%
         level_passed = pct >= self.LEVEL_PASS_PERCENTAGE
 
-        # Update candidate's sublevel/level if score >= 80%
+        # Update candidate's sublevel/level only if score >= 80%
         if level_passed:
             next_sublevel = self._get_next_sublevel_up()
             if next_sublevel:
                 self.candidate.current_cefr_level = next_sublevel.cefr_level
                 self.candidate.current_sublevel = next_sublevel
+                self._unlock_sublevel_progress(next_sublevel)
             else:
                 next_level = self._get_next_level_up()
                 if next_level:
@@ -470,6 +582,8 @@ class AdaptiveEngine:
                         cefr_level=next_level,
                         is_active=True,
                     ).order_by('unit_order').first()
+                    if self.candidate.current_sublevel:
+                        self._unlock_sublevel_progress(self.candidate.current_sublevel)
                 else:
                     self.candidate.current_cefr_level = self.current_level
                     self.candidate.current_sublevel = self.current_sublevel
@@ -500,6 +614,23 @@ class AdaptiveEngine:
             } for k, v in self._skill_results.items()},
             'history': self._history,
         }
+
+    def _unlock_sublevel_progress(self, sublevel):
+        """Unlock all skill tracks for a newly unlocked sublevel without data loss."""
+        skills = Skill.objects.all()
+        now = timezone.now()
+        for skill in skills:
+            progress_obj, _ = UserProgress.objects.get_or_create(
+                candidate=self.candidate,
+                cefr_level=sublevel.cefr_level,
+                sublevel=sublevel,
+                skill=skill,
+                defaults={'is_unlocked': True},
+            )
+            if not progress_obj.is_unlocked:
+                progress_obj.is_unlocked = True
+                progress_obj.last_attempt_at = now
+                progress_obj.save(update_fields=['is_unlocked', 'last_attempt_at'])
 
     def _get_next_sublevel_up(self):
         if not self.current_sublevel:
@@ -594,12 +725,15 @@ class AdaptiveEngine:
           - keyword      : all keywords from correct_answer must appear in answer
           - ai_graded    : route to Gemini
         """
-        if not response_text.strip():
+        if not response_text or not response_text.strip():
             return False, 0.0, 'No answer provided', None
 
         mode    = getattr(question, 'answer_matching_mode', 'normalized') or 'normalized'
         correct = question.correct_answer or ''
-        answer  = response_text.strip()
+        answer = response_text.strip()
+        normalized_answer = self._normalize_text(answer)
+        if not normalized_answer:
+            return False, 0.0, 'No answer provided', None
 
         # ai_graded — delegate to Gemini
         if mode == 'ai_graded':
@@ -620,14 +754,14 @@ class AdaptiveEngine:
             accepted = list(getattr(question, 'accepted_answers', None) or [])
             if not accepted and correct:
                 accepted = [c.strip() for c in correct.split('|') if c.strip()]
-            lower_ans = answer.lower()
+            lower_ans = normalized_answer
             for acc in accepted:
-                if lower_ans == acc.strip().lower():
+                if lower_ans == self._normalize_text(acc):
                     return True, max_score, 'Correct!', None
             # Near-match via difflib
             from difflib import SequenceMatcher
             for acc in accepted:
-                if SequenceMatcher(None, lower_ans, acc.strip().lower()).ratio() >= 0.85:
+                if SequenceMatcher(None, lower_ans, self._normalize_text(acc)).ratio() >= 0.85:
                     return True, max_score, 'Correct (near-match)!', None
             fb = 'Incorrect. Accepted: ' + ' / '.join(str(a) for a in accepted[:3])
             if question.explanation:
@@ -636,8 +770,8 @@ class AdaptiveEngine:
 
         # exact — case-sensitive
         if mode == 'exact':
-            options = [c.strip() for c in correct.split('|') if c.strip()]
-            if answer in options:
+            single_correct = next((c.strip() for c in correct.split('|') if c.strip()), '')
+            if answer == single_correct:
                 return True, max_score, 'Correct!', None
             fb = f'Incorrect. Expected: {correct}'
             if question.explanation:
@@ -646,8 +780,9 @@ class AdaptiveEngine:
 
         # keyword — all keywords must appear in the answer
         if mode == 'keyword':
-            keywords = [w.strip().lower() for w in correct.split() if w.strip()]
-            lower_ans = answer.lower()
+            single_correct = next((c.strip() for c in correct.split('|') if c.strip()), '')
+            keywords = [w.strip().lower() for w in single_correct.split() if w.strip()]
+            lower_ans = normalized_answer
             if all(kw in lower_ans for kw in keywords):
                 return True, max_score, 'Correct!', None
             fb = f'Incorrect. Your answer should include: {correct}'
@@ -656,14 +791,19 @@ class AdaptiveEngine:
             return False, 0.0, fb, None
 
         # normalized (default) — case-insensitive, pipe-separated alternatives
-        options = [c.strip().lower() for c in correct.split('|') if c.strip()]
-        if answer.lower() in options:
+        single_correct = next((c.strip() for c in correct.split('|') if c.strip()), '')
+        if normalized_answer == self._normalize_text(single_correct):
             return True, max_score, 'Correct!', None
 
         fb = f'Incorrect. The correct answer is: {correct}'
         if question.explanation:
             fb += f' | {question.explanation}'
         return False, 0.0, fb, None
+
+    @staticmethod
+    def _normalize_text(value):
+        """Normalize learner input and expected answers for safe comparison."""
+        return ' '.join(str(value).strip().lower().split())
 
     def _grade_matching(self, question, response_data, max_score):
         """Grade a matching question. response_data = {'pairs': {'1':'2', '2':'1', ...}}"""
