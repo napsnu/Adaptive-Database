@@ -164,6 +164,12 @@ LOVABLE_FRONTEND_ORIGIN = os.environ.get('LOVABLE_FRONTEND_ORIGIN', 'https://ski
 if LOVABLE_FRONTEND_ORIGIN and LOVABLE_FRONTEND_ORIGIN not in CORS_ALLOWED_ORIGINS:
     CORS_ALLOWED_ORIGINS.append(LOVABLE_FRONTEND_ORIGIN)
 
+# Allow all Lovable editor/preview origins (lovable.dev + *.lovable.app)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'^https://.*\.lovable\.app$',
+    r'^https://lovable\.dev$',
+]
+
 CSRF_TRUSTED_ORIGINS = _env_list('CSRF_TRUSTED_ORIGINS', '')
 if RENDER_EXTERNAL_HOSTNAME:
     render_origin = f"https://{RENDER_EXTERNAL_HOSTNAME}"
@@ -171,6 +177,11 @@ if RENDER_EXTERNAL_HOSTNAME:
         CSRF_TRUSTED_ORIGINS.append(render_origin)
 if LOVABLE_FRONTEND_ORIGIN and LOVABLE_FRONTEND_ORIGIN not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(LOVABLE_FRONTEND_ORIGIN)
+# Allow all Lovable origins for CSRF too
+CSRF_TRUSTED_ORIGINS += [
+    'https://lovable.dev',
+    'https://*.lovable.app',
+]
 
 # Secure defaults for non-debug environments (can be overridden by env vars)
 SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', not DEBUG)
