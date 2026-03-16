@@ -438,6 +438,9 @@ class SessionResultsView(View):
                 'starting_sublevel': session.starting_sublevel.code if session.starting_sublevel else None,
                 'final_level': session.final_level.code if session.final_level else None,
                 'final_sublevel': session.final_sublevel.code if session.final_sublevel else None,
+                # Aliases matching finish_session() field names expected by Results.tsx
+                'level': session.final_level.code if session.final_level else None,
+                'sublevel': session.final_sublevel.code if session.final_sublevel else None,
                 'total_questions': session.total_questions,
                 'correct_answers': session.correct_answers,
                 'percentage': session.percentage,
