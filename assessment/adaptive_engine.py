@@ -52,10 +52,10 @@ class AdaptiveEngine:
         final = engine.finish_session()
     """
 
-    QUESTIONS_PER_SKILL = 3
-    SUBLEVEL_QUESTIONS_PER_SKILL = 1
-    PASS_THRESHOLD = 2      # >= 2 correct out of 3 to pass a skill
-    MAX_RETRIES = 2         # max retries per skill (3 attempts total)
+    QUESTIONS_PER_SKILL = 5
+    SUBLEVEL_QUESTIONS_PER_SKILL = 5
+    PASS_THRESHOLD = 4      # >= 4 correct out of 5 to pass a skill (80 %)
+    MAX_RETRIES = 1         # max retries per skill (2 attempts total)
 
     def __init__(self, candidate, starting_level_code='A1', skill_code=None,
                  session_type='practice', starting_sublevel_code=None):
@@ -585,19 +585,82 @@ class AdaptiveEngine:
         return False, 0.0, fb, option
 
     def _grade_text_input(self, question, response_text, max_score):
-        """Grade a fill-in-the-gap or short answer question."""
+        """Grade a fill-in-the-gap or short answer question.
+
+        Respects question.answer_matching_mode:
+          - normalized   : case-insensitive + strip (default)
+          - exact        : case-sensitive, exact string match
+          - multi_accepted : check against question.accepted_answers JSON list
+          - keyword      : all keywords from correct_answer must appear in answer
+          - ai_graded    : route to Gemini
+        """
         if not response_text.strip():
             return False, 0.0, 'No answer provided', None
 
-        correct = question.correct_answer.strip().lower()
-        # Support multiple correct answers separated by |
-        correct_options = [c.strip() for c in correct.split('|')]
-        answer = response_text.strip().lower()
+        mode    = getattr(question, 'answer_matching_mode', 'normalized') or 'normalized'
+        correct = question.correct_answer or ''
+        answer  = response_text.strip()
 
-        if answer in correct_options:
+        # ai_graded — delegate to Gemini
+        if mode == 'ai_graded':
+            gemini_result = grade_with_gemini(
+                question_text=question.question_text,
+                response_text=answer,
+                skill_code=question.skill.code,
+                question_type_code=question.question_type.code,
+                cefr_level=question.cefr_level.code,
+                max_score=max_score,
+            )
+            if gemini_result is not None:
+                return gemini_result[0], gemini_result[1], gemini_result[2], None
+            return False, 0.0, 'Awaiting AI grading', None
+
+        # multi_accepted — check against accepted_answers JSON list
+        if mode == 'multi_accepted':
+            accepted = list(getattr(question, 'accepted_answers', None) or [])
+            if not accepted and correct:
+                accepted = [c.strip() for c in correct.split('|') if c.strip()]
+            lower_ans = answer.lower()
+            for acc in accepted:
+                if lower_ans == acc.strip().lower():
+                    return True, max_score, 'Correct!', None
+            # Near-match via difflib
+            from difflib import SequenceMatcher
+            for acc in accepted:
+                if SequenceMatcher(None, lower_ans, acc.strip().lower()).ratio() >= 0.85:
+                    return True, max_score, 'Correct (near-match)!', None
+            fb = 'Incorrect. Accepted: ' + ' / '.join(str(a) for a in accepted[:3])
+            if question.explanation:
+                fb += f' | {question.explanation}'
+            return False, 0.0, fb, None
+
+        # exact — case-sensitive
+        if mode == 'exact':
+            options = [c.strip() for c in correct.split('|') if c.strip()]
+            if answer in options:
+                return True, max_score, 'Correct!', None
+            fb = f'Incorrect. Expected: {correct}'
+            if question.explanation:
+                fb += f' | {question.explanation}'
+            return False, 0.0, fb, None
+
+        # keyword — all keywords must appear in the answer
+        if mode == 'keyword':
+            keywords = [w.strip().lower() for w in correct.split() if w.strip()]
+            lower_ans = answer.lower()
+            if all(kw in lower_ans for kw in keywords):
+                return True, max_score, 'Correct!', None
+            fb = f'Incorrect. Your answer should include: {correct}'
+            if question.explanation:
+                fb += f' | {question.explanation}'
+            return False, 0.0, fb, None
+
+        # normalized (default) — case-insensitive, pipe-separated alternatives
+        options = [c.strip().lower() for c in correct.split('|') if c.strip()]
+        if answer.lower() in options:
             return True, max_score, 'Correct!', None
 
-        fb = f'Incorrect. The correct answer is: {question.correct_answer}'
+        fb = f'Incorrect. The correct answer is: {correct}'
         if question.explanation:
             fb += f' | {question.explanation}'
         return False, 0.0, fb, None

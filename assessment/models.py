@@ -5,13 +5,14 @@ Covers all 4 language skills (Reading, Writing, Speaking, Listening) with
 multiple question types per skill and topics that vary by CEFR level.
 
 Models:
+ 0. DifficultyTier  - Beginner / Intermediate / Advanced (grade-band grouping)
  1. CEFRLevel       - A1 through C2 with score thresholds
- 2. CEFRSubLevel    - Unit-level path inside a CEFR level (e.g., A1.1)
+ 2. CEFRSubLevel    - Unit-level path inside a CEFR level (e.g., A1.1, A1.2, A1.3)
  3. Skill           - Reading, Writing, Speaking, Listening
  4. QuestionType    - MCQ, fill-in-gaps, matching, describe picture, write letter, etc.
  5. Topic           - Greetings, Travel, Business, etc. (linked to levels)
- 6. Question        - A single question linking level + sublevel + skill + type + topic
- 7. AnswerSample    - Multiple acceptable writing answers for one question
+ 6. Question        - A single question linking tier + level + sublevel + skill + type + topic
+ 7. AnswerSample    - Multiple acceptable answers for subjective questions
  8. QuestionOption  - Answer choices for MCQ / True-False questions
  9. MatchingPair    - Left-Right pairs for matching questions
 10. OrderingItem    - Items with correct positions for ordering questions
@@ -27,6 +28,34 @@ Models:
 import uuid
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
+
+
+# =====================================================================
+# 0. DIFFICULTY TIERS  (Beginner → Intermediate → Advanced)
+# =====================================================================
+
+class DifficultyTier(models.Model):
+    """Grade-band grouping: Beginner (Gr 4-5), Intermediate (Gr 6-7), Advanced (Gr 8-9+)."""
+
+    TIER_CHOICES = [
+        ('beginner',     'Beginner'),
+        ('intermediate', 'Intermediate'),
+        ('advanced',     'Advanced'),
+    ]
+
+    code       = models.CharField(max_length=20, unique=True, choices=TIER_CHOICES)
+    name       = models.CharField(max_length=50)
+    order      = models.PositiveIntegerField(unique=True, help_text="1=Beginner, 2=Intermediate, 3=Advanced")
+    grade_band = models.CharField(max_length=20, blank=True, help_text="e.g. '4-5', '6-7', '8-9'")
+    description = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['order']
+        verbose_name = "Difficulty Tier"
+        verbose_name_plural = "Difficulty Tiers"
+
+    def __str__(self):
+        return self.name
 
 
 # =====================================================================
@@ -119,6 +148,11 @@ class QuestionType(models.Model):
         ('audio', 'Audio Recording'),
         ('ordering', 'Ordering / Sequencing'),
         ('matching', 'Matching Pairs'),
+        # Extended formats added for full skill-mode taxonomy
+        ('dictation', 'Dictation'),
+        ('sentence_build', 'Sentence Building'),
+        ('error_correction', 'Error Correction'),
+        ('picture_prompt', 'Picture-Based Prompt'),
     ]
 
     code = models.CharField(max_length=50, unique=True)
@@ -202,10 +236,43 @@ class Question(models.Model):
     media_url = models.URLField(max_length=500, blank=True, help_text="Image / audio / video URL")
     media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES, blank=True, default='')
 
-    correct_answer = models.TextField(blank=True, help_text="Correct answer for auto-gradable types")
-    sample_answer = models.TextField(blank=True, help_text="Model answer for subjective types")
-    explanation = models.TextField(blank=True, help_text="Why the correct answer is correct")
+    # ── Answer fields ─────────────────────────────────────────────────
+    correct_answer = models.TextField(blank=True, help_text="Correct answer for objective (auto-gradable) types")
+    accepted_answers = models.JSONField(
+        default=list, blank=True,
+        help_text="List of accepted answer strings for subjective types (used instead of AnswerSample for text matching)"
+    )
+    sample_answer = models.TextField(blank=True, help_text="Legacy: pipe-separated model answers for subjective types")
+    explanation = models.TextField(blank=True, help_text="Why the correct answer is correct (shown after attempt)")
 
+    # ── Answer-matching configuration ─────────────────────────────────
+    MATCHING_MODE_CHOICES = [
+        ('exact',         'Exact Match'),
+        ('normalized',    'Normalised (strip + lowercase)'),
+        ('keyword',       'Keyword Overlap'),
+        ('multi_accepted', 'Multiple Accepted Answers'),
+        ('ai_graded',     'AI Graded'),
+    ]
+    answer_matching_mode = models.CharField(
+        max_length=20, choices=MATCHING_MODE_CHOICES, default='normalized',
+        help_text="How the engine should compare the learner's response to the correct answer"
+    )
+    is_case_sensitive = models.BooleanField(default=False)
+
+    # ── Speaking-mode extra payload ───────────────────────────────────
+    speaking_topic = models.TextField(
+        blank=True,
+        help_text="Explicit topic or prompt for speaking questions (always sent to frontend)"
+    )
+
+    # ── Difficulty & tier ─────────────────────────────────────────────
+    difficulty_tier = models.ForeignKey(
+        'DifficultyTier',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='questions',
+        help_text="Beginner / Intermediate / Advanced grade band",
+    )
     difficulty = models.PositiveIntegerField(default=1, help_text="1=easy, 2=medium, 3=hard within level")
     points = models.PositiveIntegerField(default=1)
     time_limit_seconds = models.PositiveIntegerField(null=True, blank=True)

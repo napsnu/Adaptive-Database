@@ -147,6 +147,10 @@ class QuestionListView(View):
         if topic:
             qs = qs.filter(topic__code=topic)
 
+        tier = request.GET.get('tier')
+        if tier:
+            qs = qs.filter(difficulty_tier__code=tier)
+
         try:
             limit = int(request.GET.get('limit', 100))
         except ValueError:
@@ -349,6 +353,10 @@ class NextQuestionView(View):
         # For other speaking questions: needs microphone, no TTS
         elif skill_code == 'speaking':
             data['requires_microphone'] = True
+
+            # Always include speaking_topic for speaking questions
+            if skill_code == 'speaking':
+                data['speaking_topic'] = question.speaking_topic or question.question_text
 
         fmt = question.question_type.response_format
         if fmt in ('single_choice', 'true_false'):
