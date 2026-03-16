@@ -25,7 +25,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from .models import (
-    CEFRLevel, CEFRSubLevel, Skill, QuestionType, Topic,
+    CEFRLevel, CEFRSubLevel, DifficultyTier, Skill, QuestionType, Topic,
     Question, QuestionOption, MatchingPair, OrderingItem,
     Candidate, AssessmentSession, Response, SkillScore, AnswerSample,
 )
@@ -71,6 +71,7 @@ class DashboardView(View):
             'endpoints': [
                 'GET /api/levels/', 'GET /api/skills/',
                 'GET /api/sublevels/?level=A1',
+                'GET /api/difficulty-tiers/',
                 'GET /api/question-types/', 'GET /api/topics/',
                 'GET /api/questions/?level=A1&sublevel=A1.1&skill=reading',
                 'GET /api/questions/<question_id>/',
@@ -103,6 +104,16 @@ class SubLevelListView(View):
             'cefr_level__code', 'cefr_level__name',
         ))
         return JsonResponse({'sublevels': sublevels, 'count': len(sublevels)})
+
+
+class DifficultyTierListView(View):
+    def get(self, request):
+        tiers = list(
+            DifficultyTier.objects
+            .values('code', 'name', 'description', 'grade_band', 'order')
+            .order_by('order')
+        )
+        return JsonResponse({'difficulty_tiers': tiers, 'count': len(tiers)})
 
 
 class SkillListView(View):

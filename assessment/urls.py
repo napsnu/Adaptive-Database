@@ -7,6 +7,7 @@ urlpatterns = [
     path('', views.DashboardView.as_view(), name='dashboard'),
     path('levels/', views.LevelListView.as_view(), name='levels'),
     path('sublevels/', views.SubLevelListView.as_view(), name='sublevels'),
+    path('difficulty-tiers/', views.DifficultyTierListView.as_view(), name='difficulty-tiers'),
     path('skills/', views.SkillListView.as_view(), name='skills'),
     path('question-types/', views.QuestionTypeListView.as_view(), name='question-types'),
     path('topics/', views.TopicListView.as_view(), name='topics'),
