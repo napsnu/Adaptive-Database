@@ -305,6 +305,7 @@ class NextQuestionView(View):
             })
 
         progress = engine.get_progress()
+        skill_code = question.skill.code
         instruction = question.instruction_text or question.question_type.instruction_template
         if skill_code == 'speaking' and not instruction:
             instruction = 'Speak clearly and stay on topic.'
@@ -328,7 +329,6 @@ class NextQuestionView(View):
             'progress': progress,
         }
 
-        skill_code = question.skill.code
         # For listening questions: generate TTS audio, hide the transcript
         if skill_code == 'listening':
             tts_text = question.content_text or question.question_text
