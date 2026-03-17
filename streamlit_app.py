@@ -76,6 +76,9 @@ def init_state():
         'assessment_history': [],
         'tts_audio_b64': None,
         'candidate': None,
+        'selected_sublevel': None,
+        'selected_difficulty_tier': None,
+        'question_retry_pending': False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -212,6 +215,7 @@ def page_dashboard():
 
     current_level_obj = candidate.current_cefr_level
     current_level_code = current_level_obj.code if current_level_obj else 'N/A'
+    current_sublevel_obj = candidate.current_sublevel
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -225,7 +229,8 @@ def page_dashboard():
         else:
             st.metric("STRONGEST SKILL", "—")
     with col4:
-        st.metric("CURRENT LEVEL", current_level_code)
+        sub_suffix = f" / {current_sublevel_obj.code}" if current_sublevel_obj else ""
+        st.metric("CURRENT LEVEL", f"{current_level_code}{sub_suffix}")
 
     # ── CEFR Progression ─────────────────────────────────────────────
     st.divider()
@@ -258,6 +263,46 @@ def page_dashboard():
                 unsafe_allow_html=True,
             )
     st.caption("≥80% to unlock the next level")
+
+    # ── Sub-Level Progression ─────────────────────────────────────────
+    from assessment.models import CEFRSubLevel
+    if current_level_obj:
+        sublevels = list(CEFRSubLevel.objects.filter(
+            cefr_level=current_level_obj, is_active=True
+        ).order_by('unit_order'))
+        if sublevels:
+            st.divider()
+            st.markdown(f"### {current_level_code} Sub-Level Progression")
+            row1 = sublevels[:6]
+            row2 = sublevels[6:]
+            for row in (row1, row2):
+                if not row:
+                    continue
+                row_cols = st.columns(len(row))
+                for col, sl in zip(row_cols, row):
+                    with col:
+                        is_current_sub = (
+                            current_sublevel_obj and sl.code == current_sublevel_obj.code
+                        )
+                        is_past_sub = bool(
+                            current_sublevel_obj
+                            and sl.unit_order < current_sublevel_obj.unit_order
+                        )
+                        if is_past_sub:
+                            bg, fg, sub_icon = '#22C55E', 'white', '✅'
+                        elif is_current_sub:
+                            bg, fg, sub_icon = '#3B82F6', 'white', '📍'
+                        else:
+                            bg, fg, sub_icon = '#E5E7EB', '#9CA3AF', '🔒'
+                        st.markdown(
+                            f'<div style="background:{bg};color:{fg};border-radius:8px;'
+                            f'padding:8px 4px;text-align:center;margin:2px;">'
+                            f'<div style="font-size:14px">{sub_icon}</div>'
+                            f'<div style="font-weight:700;font-size:12px;margin-top:2px">{sl.code}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+            st.caption("Complete each sub-level (≥80%) to progress to the next")
 
     # ── Quick actions ─────────────────────────────────────────────────
     st.divider()
@@ -303,6 +348,8 @@ def page_dashboard():
                     type="primary" if is_current else "secondary",
                 ):
                     st.session_state.selected_level = lv.code
+                    st.session_state.selected_sublevel = None
+                    st.session_state.selected_difficulty_tier = None
                     _start_assessment()
                     st.rerun()
 
@@ -323,9 +370,10 @@ def page_dashboard():
 
 
 def page_setup():
-    """Candidate info + level selection."""
+    """Candidate info + level / sublevel / difficulty tier selection."""
     st.markdown("## 🎯 Start Your Assessment")
-    st.markdown("Enter your details and select a CEFR level to begin.")
+
+    from assessment.models import DifficultyTier, CEFRSubLevel
 
     with st.form("setup_form"):
         col1, col2 = st.columns(2)
@@ -335,23 +383,48 @@ def page_setup():
             email = st.text_input("Your Email", value=st.session_state.candidate_email or "")
 
         st.divider()
-        st.markdown("### Select CEFR Level")
-
+        st.markdown("### 1️⃣  Select CEFR Level")
         levels = list(CEFRLevel.objects.all().order_by('order'))
-        level_options = {f"{lv.code} - {lv.name}": lv.code for lv in levels}
-        selected = st.selectbox("Level", list(level_options.keys()))
+        level_options = {f"{lv.code} — {lv.name}": lv.code for lv in levels}
+        default_level = st.session_state.selected_level or 'A1'
+        default_idx = next(
+            (i for i, v in enumerate(level_options.values()) if v == default_level), 0
+        )
+        selected_level_label = st.selectbox("CEFR Level", list(level_options.keys()), index=default_idx)
+        selected_level_code = level_options[selected_level_label]
 
-        # Show level descriptions
-        for lv in levels:
-            if f"{lv.code} - {lv.name}" == selected:
-                if lv.description:
-                    st.caption(lv.description)
-                q_count = Question.objects.filter(cefr_level=lv, is_active=True).count()
-                st.caption(f"Questions available: {q_count}")
-                break
+        st.markdown("### 2️⃣  Select Sub-Level (optional)")
+        sublevels = list(
+            CEFRSubLevel.objects.filter(
+                cefr_level__code=selected_level_code, is_active=True
+            ).order_by('unit_order')
+        )
+        sublevel_options = {"— All sub-levels (full level test) —": None}
+        for s in sublevels:
+            sublevel_options[f"{s.code} — {s.title}"] = s.code
+        selected_sublevel_label = st.selectbox("Sub-Level", list(sublevel_options.keys()))
+        selected_sublevel_code = sublevel_options[selected_sublevel_label]
+
+        st.markdown("### 3️⃣  Select Difficulty Tier")
+        tiers = list(DifficultyTier.objects.all().order_by('order'))
+        tier_options = {"— Any difficulty —": None}
+        for t in tiers:
+            desc = f" (Grade {t.grade_band})" if t.grade_band else ""
+            tier_options[f"{t.name}{desc}"] = t.code
+        selected_tier_label = st.selectbox("Difficulty Tier", list(tier_options.keys()))
+        selected_tier_code = tier_options[selected_tier_label]
 
         st.divider()
-        st.markdown("**Assessment Flow:** Reading → Writing → Speaking → Listening (3 questions each)")
+        st.markdown("**Flow:** Reading → Writing → Listening → Speaking (5 questions each skill, 80% to pass)")
+
+        q_count = Question.objects.filter(cefr_level__code=selected_level_code, is_active=True).count()
+        if selected_sublevel_code:
+            q_count = Question.objects.filter(
+                cefr_level__code=selected_level_code,
+                sublevel__code=selected_sublevel_code,
+                is_active=True,
+            ).count()
+        st.caption(f"Questions available for this selection: {q_count}")
 
         submitted = st.form_submit_button("Begin Assessment", type="primary", use_container_width=True)
 
@@ -363,12 +436,14 @@ def page_setup():
             else:
                 st.session_state.candidate_name = name.strip()
                 st.session_state.candidate_email = email.strip()
-                st.session_state.selected_level = level_options[selected]
+                st.session_state.selected_level = selected_level_code
+                st.session_state.selected_sublevel = selected_sublevel_code
+                st.session_state.selected_difficulty_tier = selected_tier_code
                 _start_assessment()
                 st.rerun()
 
-    if st.button("← Back to Home"):
-        go_to('home')
+    if st.button("← Back"):
+        go_to('dashboard' if st.session_state.candidate else 'home')
         st.rerun()
 
 
@@ -386,6 +461,8 @@ def _start_assessment():
     engine = AdaptiveEngine(
         candidate,
         starting_level_code=st.session_state.selected_level,
+        starting_sublevel_code=st.session_state.selected_sublevel,
+        difficulty_tier_code=st.session_state.selected_difficulty_tier,
         session_type='practice',
     )
     session = engine.start_session()
@@ -423,6 +500,10 @@ def page_assessment():
 
     # ── Get next question ────────────────────────────────────────
     if st.session_state.current_question is None:
+        # Always flush stale audio before fetching a new question
+        st.session_state.tts_audio_b64 = None
+        st.session_state.tts_text = None
+
         q = engine.get_next_question()
         if q is None:
             go_to('results')
@@ -430,6 +511,7 @@ def page_assessment():
             return
         st.session_state.current_question = q
         st.session_state.question_number += 1
+        st.session_state.question_retry_pending = False
         # Generate TTS for listening
         if q.skill.code == 'listening':
             tts_text = q.content_text or q.question_text
@@ -476,12 +558,17 @@ def page_assessment():
     if st.session_state.last_result:
         r = st.session_state.last_result
         if r['is_correct']:
-            st.success(f"✅ Previous answer correct! +{r['score']} points — {r['feedback']}")
+            st.success(f"✅ Correct! +{r['score']} points — {r['feedback']}")
+        elif r.get('action') == 'QUESTION_RETRY':
+            remaining = r.get('question_remaining_attempts', 1)
+            st.error(f"❌ Incorrect — {r['feedback']}")
+            st.warning(f"🔁 You have **{remaining}** more attempt — try the same question again!")
+            # Keep feedback visible until next submit; don't clear yet
         else:
-            st.error(f"❌ Previous answer incorrect — {r['feedback']}")
-            if r.get('action') == 'QUESTION_RETRY':
-                remaining = r.get('question_remaining_attempts', 1)
-                st.info(f"💡 You have **{remaining}** more attempt(s) for this question — try again!")
+            st.error(f"❌ Incorrect — {r['feedback']}")
+            st.session_state.last_result = None
+    # Always clear non-retry results after display
+    if st.session_state.last_result and st.session_state.last_result.get('action') != 'QUESTION_RETRY':
         st.session_state.last_result = None
 
     # ── Render question by skill type ────────────────────────────
@@ -802,11 +889,19 @@ def _submit_answer(question, selected_option_label=None, response_text='',
     )
 
     st.session_state.last_result = result
-    st.session_state.current_question = None
     st.session_state.tts_audio_b64 = None
 
-    # Check for skill transition
     action = result.get('action', 'CONTINUE')
+
+    if action == 'QUESTION_RETRY':
+        # Wrong on first attempt — keep the same question loaded, just refresh feedback
+        st.session_state.question_retry_pending = True
+        # Do NOT clear current_question so the same question re-renders
+    else:
+        st.session_state.current_question = None
+        st.session_state.question_retry_pending = False
+
+    # Check for skill transition
     if action in ('SKILL_PASSED', 'SKILL_FAILED_RETRY', 'SKILL_FAILED_MAX_RETRIES'):
         st.session_state.show_skill_modal = True
         st.session_state.skill_modal_data = {
@@ -969,8 +1064,12 @@ def page_results():
     col1, col2, col3 = st.columns(3)
     with col1:
         if passed and final.get('next_level'):
-            if st.button(f"🚀 Try {final['next_level']}", type="primary", use_container_width=True):
-                st.session_state.selected_level = final['next_level']
+            next_dest = final['next_level']
+            next_cefr = next_dest.split('.')[0] if '.' in next_dest else next_dest
+            next_sub = next_dest if '.' in next_dest else None
+            if st.button(f"🚀 Try {next_dest}", type="primary", use_container_width=True):
+                st.session_state.selected_level = next_cefr
+                st.session_state.selected_sublevel = next_sub
                 st.session_state.engine = None
                 st.session_state.current_question = None
                 st.session_state.question_number = 0

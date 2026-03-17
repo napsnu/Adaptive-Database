@@ -592,6 +592,12 @@ class AdaptiveEngine:
             self.candidate.current_sublevel = self.current_sublevel
         self.candidate.save(update_fields=['current_cefr_level', 'current_sublevel'])
 
+        next_destination = self.candidate.current_sublevel.code if (
+            level_passed and self.candidate.current_sublevel
+        ) else (
+            self.candidate.current_cefr_level.code if level_passed and self.candidate.current_cefr_level else None
+        )
+
         return {
             'session_id': str(self.session.id),
             'candidate': self.candidate.name,
@@ -599,7 +605,8 @@ class AdaptiveEngine:
             'level': self.current_level.code,
             'sublevel': self.current_sublevel.code if self.current_sublevel else None,
             'level_passed': level_passed,
-            'next_level': self.candidate.current_cefr_level.code if level_passed and self.candidate.current_cefr_level else None,
+            # next_level holds the next sublevel code if one exists, else next CEFR level
+            'next_level': next_destination,
             'next_sublevel': self.candidate.current_sublevel.code if level_passed and self.candidate.current_sublevel else None,
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
