@@ -511,16 +511,27 @@ def page_assessment():
         st.session_state.current_question = q
         st.session_state.question_number += 1
         st.session_state.question_retry_pending = False
-        # Generate TTS for listening
+        # Generate TTS for listening and speaking with tier-based speed
+        speed = 1.0  # Default normal speed
+        if engine.current_tier:
+            tier_code = engine.current_tier.code.lower()
+            if tier_code == 'beginner':
+                speed = 0.75  # Slower for beginners
+            elif tier_code == 'intermediate':
+                speed = 0.9   # Medium speed
+            # Advanced and others use 1.0 (normal)
+        
         if q.skill.code == 'listening':
             tts_text = q.content_text or q.question_text
+            # Remove prefixes (also done in generate_tts_audio but doing here for consistency)
+            tts_text = re.sub(r'^\[Transcript\]\s*', '', tts_text, flags=re.IGNORECASE)
             tts_text = re.sub(r'^\[Audio[^\]]*\]\s*', '', tts_text, flags=re.IGNORECASE)
-            audio_b64 = generate_tts_audio(tts_text)
+            audio_b64 = generate_tts_audio(tts_text, speed=speed)
             st.session_state.tts_audio_b64 = audio_b64
             st.session_state.tts_text = tts_text
         elif q.skill.code == 'speaking' and q.question_type.code == 'read_aloud':
             tts_text = q.content_text or q.question_text
-            audio_b64 = generate_tts_audio(tts_text)
+            audio_b64 = generate_tts_audio(tts_text, speed=speed)
             st.session_state.tts_audio_b64 = audio_b64
             st.session_state.tts_text = tts_text
         else:
@@ -625,7 +636,9 @@ def _render_listening_question(question):
     else:
         # Show transcript as fallback
         if question.content_text:
-            transcript = re.sub(r'^\[Audio[^\]]*\]\s*', '', question.content_text, flags=re.IGNORECASE)
+            # Remove [Transcript] and [Audio...] prefixes
+            transcript = re.sub(r'^\[Transcript\]\s*', '', question.content_text, flags=re.IGNORECASE)
+            transcript = re.sub(r'^\[Audio[^\]]*\]\s*', '', transcript, flags=re.IGNORECASE)
             st.warning("⚠️ TTS unavailable. Showing transcript:")
             st.write(transcript)
 

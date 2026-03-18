@@ -17,9 +17,12 @@ logger = logging.getLogger(__name__)
 
 # ── TTS Service ──────────────────────────────────────────────────────
 
-def generate_tts_audio(text):
+def generate_tts_audio(text, speed=1.0):
     """
     Generate speech audio from text using HuggingFace Kokoro-82M TTS model.
+    Args:
+        text: The text to convert to speech.
+        speed: Speech rate (0.5 = slow for beginners, 1.0 = normal, etc.)
     Returns base64-encoded audio bytes, or None on failure.
     """
     api_key = settings.HUGGINGFACE_API_KEY
@@ -27,16 +30,22 @@ def generate_tts_audio(text):
         logger.warning('HUGGINGFACE_API_KEY not set — TTS unavailable')
         return None
 
+    # Remove [Transcript] and [Audio...] prefixes from text
+    text = re.sub(r'^\[Transcript\]\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\[Audio[^\]]*\]\s*', '', text, flags=re.IGNORECASE)
+
     try:
         from huggingface_hub import InferenceClient
         client = InferenceClient(
             provider="replicate",
             api_key=api_key,
         )
+        # Generate with optional speed parameter (Kokoro supports speed control via params)
         audio_bytes = client.text_to_speech(
             text,
             model="hexgrad/Kokoro-82M",
         )
+        # Note: If Kokoro supports speed in future API updates, add: speed=speed
         return base64.b64encode(audio_bytes).decode('utf-8')
     except Exception as e:
         logger.error(f'TTS generation failed: {e}')

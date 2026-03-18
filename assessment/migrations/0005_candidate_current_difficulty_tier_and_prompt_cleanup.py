@@ -41,6 +41,20 @@ def _forward(apps, schema_editor):
             question.question_text = cleaned
             question.save(update_fields=['question_text'])
 
+    # Remove [Transcript] prefix from listening content.
+    transcript_pattern = re.compile(r"^\[Transcript\]\s*", flags=re.IGNORECASE)
+    Skill = apps.get_model('assessment', 'Skill')
+    try:
+        listening_skill = Skill.objects.get(code='listening')
+        for question in Question.objects.filter(skill=listening_skill).only('id', 'content_text'):
+            if question.content_text:
+                cleaned = transcript_pattern.sub('', question.content_text)
+                if cleaned != question.content_text:
+                    question.content_text = cleaned
+                    question.save(update_fields=['content_text'])
+    except Skill.DoesNotExist:
+        pass
+
 
 def _backward(apps, schema_editor):
     # Prompt cleanup and candidate tier defaults are intentionally non-reversible.
