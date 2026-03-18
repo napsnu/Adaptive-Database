@@ -1,1 +1,1 @@
-web: python manage.py migrate && python manage.py collectstatic --noinput && gunicorn adaptive_cefr.wsgi --bind 0.0.0.0:$PORT
+web: gunicorn adaptive_cefr.wsgi --bind 0.0.0.0:$PORT
