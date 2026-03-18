@@ -30,6 +30,7 @@ from assessment.ai_services import grade_with_gemini
 
 # Skill order for hierarchical progression
 SKILL_ORDER = ['reading', 'writing', 'listening', 'speaking']
+TIER_PROGRESS_ORDER = ['beginner', 'intermediate', 'advanced']
 
 
 class AdaptiveEngine:
@@ -187,10 +188,13 @@ class AdaptiveEngine:
         return Question.objects.filter(id=next_qid, is_active=True).first()
 
     def _build_skill_question_queue(self, skill_code):
-        """Preselect a random queue for this skill-attempt.
+        """Preselect a queue for this skill-attempt.
 
         Target is 5 questions from the stored pool (usually 10). On retakes, avoid
         immediate repetition from the prior attempt when possible.
+
+        If no fixed tier is selected, question order is progressive:
+        Beginner -> Intermediate -> Advanced.
         """
         skill = Skill.objects.get(code=skill_code)
 
@@ -209,7 +213,10 @@ class AdaptiveEngine:
             if scoped.exists():
                 qs = scoped
 
-        all_ids = list(qs.values_list('id', flat=True))
+        tier_by_id = {
+            qid: tier_code for qid, tier_code in qs.values_list('id', 'difficulty_tier__code')
+        }
+        all_ids = list(tier_by_id.keys())
         if not all_ids:
             return []
 
@@ -225,17 +232,86 @@ class AdaptiveEngine:
         previous_pool = self._last_skill_attempt_pool_ids.get(skill_code, set())
         fresh_ids = [qid for qid in candidate_ids if qid not in previous_pool]
 
-        if len(fresh_ids) >= target_count:
-            selected = random.sample(fresh_ids, target_count)
+        # Fixed-tier sessions keep the classic random sampling behavior.
+        if self.difficulty_tier_code:
+            if len(fresh_ids) >= target_count:
+                selected = random.sample(fresh_ids, target_count)
+            else:
+                selected = list(fresh_ids)
+                remaining = [qid for qid in candidate_ids if qid not in selected]
+                if remaining:
+                    selected.extend(random.sample(remaining, min(target_count - len(selected), len(remaining))))
+            random.shuffle(selected)
         else:
-            selected = list(fresh_ids)
-            remaining = [qid for qid in candidate_ids if qid not in selected]
-            if remaining:
-                selected.extend(random.sample(remaining, min(target_count - len(selected), len(remaining))))
+            # Auto mode: prioritize fresh ids and enforce tier ramp-up.
+            selected = self._select_progressive_tier_ids(
+                preferred_ids=fresh_ids,
+                fallback_ids=[qid for qid in candidate_ids if qid not in fresh_ids],
+                tier_by_id=tier_by_id,
+                target_count=target_count,
+            )
 
-        random.shuffle(selected)
         self._last_skill_attempt_pool_ids[skill_code] = set(selected)
         return selected
+
+    def _tier_target_sequence(self, target_count):
+        """Return the desired difficulty progression pattern for one skill batch."""
+        if target_count <= 0:
+            return []
+        if target_count == 1:
+            return ['beginner']
+        if target_count == 2:
+            return ['beginner', 'intermediate']
+        if target_count == 3:
+            return ['beginner', 'intermediate', 'advanced']
+        if target_count == 4:
+            return ['beginner', 'beginner', 'intermediate', 'advanced']
+
+        # Default pattern for 5-question batches used by this engine.
+        sequence = ['beginner', 'beginner', 'intermediate', 'intermediate', 'advanced']
+        if target_count > 5:
+            sequence.extend(['advanced'] * (target_count - 5))
+        return sequence[:target_count]
+
+    def _select_progressive_tier_ids(self, preferred_ids, fallback_ids, tier_by_id, target_count):
+        """Select question IDs so the learner sees easy -> medium -> hard progression."""
+        tier_sequence = self._tier_target_sequence(target_count)
+
+        def _build_tier_pools(id_list):
+            pools = {tier: [] for tier in TIER_PROGRESS_ORDER}
+            for qid in id_list:
+                code = tier_by_id.get(qid)
+                if code in pools:
+                    pools[code].append(qid)
+            for tier in TIER_PROGRESS_ORDER:
+                random.shuffle(pools[tier])
+            return pools
+
+        preferred_pools = _build_tier_pools(preferred_ids)
+        fallback_pools = _build_tier_pools(fallback_ids)
+        selected = []
+
+        # First satisfy the sequence from fresh questions.
+        for tier in tier_sequence:
+            if preferred_pools[tier]:
+                selected.append(preferred_pools[tier].pop())
+
+        # Then fill missing sequence slots from fallback pool by the same tier intent.
+        if len(selected) < target_count:
+            for tier in tier_sequence:
+                if len(selected) >= target_count:
+                    break
+                if fallback_pools[tier]:
+                    selected.append(fallback_pools[tier].pop())
+
+        # Final fill: any remaining questions, still preferring easier tiers first.
+        if len(selected) < target_count:
+            for pools in (preferred_pools, fallback_pools):
+                for tier in TIER_PROGRESS_ORDER:
+                    while pools[tier] and len(selected) < target_count:
+                        selected.append(pools[tier].pop())
+
+        return selected[:target_count]
 
     def submit_answer(self, question, selected_option_label=None,
                       response_text='', response_data=None,

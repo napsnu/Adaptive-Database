@@ -2665,7 +2665,7 @@ class Command(BaseCommand):
             "correct_answer":        correct_str,
             "sample_answer":         "",    # no longer used; AnswerSample rows are canonical
             "explanation":           qdata.get("explanation", ""),
-            "difficulty":            max(1, min(3, (level.order // 2) + 1)),
+            "difficulty":            (tier.order if tier else max(1, min(3, (level.order // 2) + 1))),
             "points":               2 if skill.code in ("writing", "speaking") else 1,
             "is_active":             True,
         }

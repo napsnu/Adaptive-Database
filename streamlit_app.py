@@ -407,7 +407,7 @@ def page_setup():
 
         st.markdown("### 3️⃣  Select Difficulty Tier")
         tiers = list(DifficultyTier.objects.all().order_by('order'))
-        tier_options = {"— Any difficulty —": None}
+        tier_options = {"— Auto progression (Beginner → Intermediate → Advanced) —": None}
         for t in tiers:
             desc = f" (Grade {t.grade_band})" if t.grade_band else ""
             tier_options[f"{t.name}{desc}"] = t.code
@@ -416,6 +416,7 @@ def page_setup():
 
         st.divider()
         st.markdown("**Flow:** Reading → Writing → Listening → Speaking (5 questions each skill, 80% to pass)")
+        st.caption("Auto progression starts easier and increases tier difficulty within each skill.")
 
         q_count = Question.objects.filter(cefr_level__code=selected_level_code, is_active=True).count()
         if selected_sublevel_code:
