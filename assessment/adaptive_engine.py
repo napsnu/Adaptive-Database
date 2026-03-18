@@ -21,7 +21,7 @@ import math
 from django.db import models
 from django.utils import timezone
 from assessment.models import (
-    CEFRLevel, CEFRSubLevel, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
+    CEFRLevel, CEFRSubLevel, DifficultyTier, Skill, Question, QuestionOption, MatchingPair, OrderingItem,
     Candidate, AssessmentSession, Response, SkillScore, AnswerSample,
     UserAttempt, UserProgress,
 )
@@ -62,10 +62,11 @@ class AdaptiveEngine:
                  session_type='practice', starting_sublevel_code=None,
                  difficulty_tier_code=None):
         self.candidate = candidate
-        self.starting_level = CEFRLevel.objects.get(code=starting_level_code)
+        self.current_tier = self._resolve_starting_tier()
+        self.starting_level = self._resolve_starting_level()
         self.current_level = self.starting_level
-        self.current_sublevel = self._resolve_starting_sublevel(starting_sublevel_code)
-        self.difficulty_tier_code = difficulty_tier_code
+        self.current_sublevel = self._resolve_starting_sublevel()
+        self.difficulty_tier_code = self.current_tier.code if self.current_tier else None
         self.session_type = session_type
         self.questions_per_skill = (
             self.SUBLEVEL_QUESTIONS_PER_SKILL if self.current_sublevel else self.QUESTIONS_PER_SKILL
@@ -121,12 +122,37 @@ class AdaptiveEngine:
             return Skill.objects.get(code=code)
         return None
 
-    def _resolve_starting_sublevel(self, starting_sublevel_code):
-        if starting_sublevel_code:
-            return CEFRSubLevel.objects.get(code=starting_sublevel_code, cefr_level=self.starting_level)
+    def _resolve_starting_tier(self):
+        tier = self.candidate.current_difficulty_tier
+        if tier:
+            return tier
+
+        tier = DifficultyTier.objects.filter(code='beginner').first()
+        if not tier:
+            tier = DifficultyTier.objects.order_by('order').first()
+        self.candidate.current_difficulty_tier = tier
+        if tier:
+            self.candidate.save(update_fields=['current_difficulty_tier'])
+        return tier
+
+    def _resolve_starting_level(self):
+        level = self.candidate.current_cefr_level
+        if level:
+            return level
+        level = CEFRLevel.objects.filter(code='A1').first() or CEFRLevel.objects.order_by('order').first()
+        self.candidate.current_cefr_level = level
+        if level:
+            self.candidate.save(update_fields=['current_cefr_level'])
+        return level
+
+    def _resolve_starting_sublevel(self):
         if self.candidate.current_sublevel and self.candidate.current_sublevel.cefr_level_id == self.starting_level.id:
             return self.candidate.current_sublevel
-        return CEFRSubLevel.objects.filter(cefr_level=self.starting_level, is_active=True).order_by('unit_order').first()
+        sublevel = CEFRSubLevel.objects.filter(cefr_level=self.starting_level, is_active=True).order_by('unit_order').first()
+        self.candidate.current_sublevel = sublevel
+        if sublevel:
+            self.candidate.save(update_fields=['current_sublevel'])
+        return sublevel
 
     def start_session(self):
         """Create a new AssessmentSession."""
@@ -209,9 +235,7 @@ class AdaptiveEngine:
 
         qs = base_qs
         if self.current_sublevel:
-            scoped = qs.filter(sublevel=self.current_sublevel)
-            if scoped.exists():
-                qs = scoped
+            qs = qs.filter(sublevel=self.current_sublevel)
 
         tier_by_id = {
             qid: tier_code for qid, tier_code in qs.values_list('id', 'difficulty_tier__code')
@@ -605,6 +629,7 @@ class AdaptiveEngine:
     def get_progress(self):
         """Return detailed progress info for the frontend."""
         return {
+            'current_tier': self.difficulty_tier_code,
             'current_level': self.current_level.code,
             'current_skill': self.current_skill_code,
             'current_skill_attempt': self._current_skill_attempt,
@@ -644,6 +669,8 @@ class AdaptiveEngine:
         level_passed = pct >= self.LEVEL_PASS_PERCENTAGE
 
         # Update candidate's sublevel/level only if score >= 80%
+        tier_unlocked = False
+        next_tier_code = None
         if level_passed:
             next_sublevel = self._get_next_sublevel_up()
             if next_sublevel:
@@ -661,12 +688,26 @@ class AdaptiveEngine:
                     if self.candidate.current_sublevel:
                         self._unlock_sublevel_progress(self.candidate.current_sublevel)
                 else:
-                    self.candidate.current_cefr_level = self.current_level
-                    self.candidate.current_sublevel = self.current_sublevel
+                    # Completed current tier at its final CEFR/sublevel: unlock next tier.
+                    next_tier = self._get_next_tier_up()
+                    if next_tier:
+                        tier_unlocked = True
+                        next_tier_code = next_tier.code
+                        self.candidate.current_difficulty_tier = next_tier
+                        self.candidate.current_cefr_level = CEFRLevel.objects.filter(code='A1').first() or CEFRLevel.objects.order_by('order').first()
+                        self.candidate.current_sublevel = CEFRSubLevel.objects.filter(
+                            cefr_level=self.candidate.current_cefr_level,
+                            is_active=True,
+                        ).order_by('unit_order').first()
+                        if self.candidate.current_sublevel:
+                            self._unlock_sublevel_progress(self.candidate.current_sublevel)
+                    else:
+                        self.candidate.current_cefr_level = self.current_level
+                        self.candidate.current_sublevel = self.current_sublevel
         else:
             self.candidate.current_cefr_level = self.current_level
             self.candidate.current_sublevel = self.current_sublevel
-        self.candidate.save(update_fields=['current_cefr_level', 'current_sublevel'])
+        self.candidate.save(update_fields=['current_cefr_level', 'current_sublevel', 'current_difficulty_tier'])
 
         next_destination = self.candidate.current_sublevel.code if (
             level_passed and self.candidate.current_sublevel
@@ -684,6 +725,9 @@ class AdaptiveEngine:
             # next_level holds the next sublevel code if one exists, else next CEFR level
             'next_level': next_destination,
             'next_sublevel': self.candidate.current_sublevel.code if level_passed and self.candidate.current_sublevel else None,
+            'current_tier': self.candidate.current_difficulty_tier.code if self.candidate.current_difficulty_tier else None,
+            'tier_unlocked': tier_unlocked,
+            'next_tier': next_tier_code,
             'total_questions': self.total_questions,
             'total_correct': self.total_correct,
             'total_score': self.total_score,
@@ -723,6 +767,11 @@ class AdaptiveEngine:
             is_active=True,
             unit_order__gt=self.current_sublevel.unit_order,
         ).order_by('unit_order').first()
+
+    def _get_next_tier_up(self):
+        if not self.current_tier:
+            return None
+        return DifficultyTier.objects.filter(order__gt=self.current_tier.order).order_by('order').first()
 
     def _compute_skill_scores(self):
         """Compute and save per-skill score breakdowns."""

@@ -26,6 +26,7 @@ Idempotent: uses update_or_create on question_id so it is safe to re-run.
 """
 
 import copy
+import re
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
@@ -2355,6 +2356,13 @@ def _promote_question(tier_code, target_level_code, unit_order, skill_code, qdat
 
     target_topic = SUBLEVEL_TOPICS[target_level_code][unit_order - 1]
     prompt = item.get("prompt", "")
+    prompt = re.sub(
+        r"\s*Keep ideas coherent and relevant to [^.]+\.\s*",
+        " ",
+        prompt,
+        flags=re.IGNORECASE,
+    ).strip()
+    prompt = re.sub(r"\s{2,}", " ", prompt)
     explanation = item.get("explanation", "")
     level_note = LEVEL_COMPLEXITY_NOTE.get(target_level_code, "clear contextual communication")
     tier_note = TIER_RIGOR_NOTE.get(tier_code, "Use clear and accurate language.")
@@ -2370,7 +2378,7 @@ def _promote_question(tier_code, target_level_code, unit_order, skill_code, qdat
         ).strip()
 
     elif skill_code == "writing":
-        item["prompt"] = f"{prompt} Keep ideas coherent and relevant to {target_topic.lower()}."
+        item["prompt"] = prompt
         item["explanation"] = (
             f"{explanation} {tier_note} For {target_level_code}, organize response and add clear support."
         ).strip()
@@ -2628,6 +2636,13 @@ class Command(BaseCommand):
         # Keep per-question topic explicit for frontend/export consistency.
         qdata = dict(qdata)
         qdata.setdefault("topic", topic.name)
+        qdata["prompt"] = re.sub(
+            r"\s*Keep ideas coherent and relevant to [^.]+\.\s*",
+            " ",
+            str(qdata.get("prompt", "")),
+            flags=re.IGNORECASE,
+        ).strip()
+        qdata["prompt"] = re.sub(r"\s{2,}", " ", qdata["prompt"])
         if skill.code == "speaking" and not qdata.get("speaking_topic"):
             qdata["speaking_topic"] = qdata["prompt"]
 

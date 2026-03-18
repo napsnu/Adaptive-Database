@@ -285,22 +285,19 @@ class StartSessionView(View):
             return _json_error('email is required')
 
         name = data.get('name', 'Learner')
-        level = data.get('starting_level', 'A1')
-        sublevel_code = data.get('starting_sublevel')
-        skill_code = data.get('skill')
-        difficulty_tier = data.get('difficulty_tier')
         session_type = data.get('session_type', 'practice')
 
         candidate, _ = Candidate.objects.get_or_create(
             email=email, defaults={'name': name}
         )
+        if name and candidate.name != name:
+            candidate.name = name
+            candidate.save(update_fields=['name'])
 
         try:
             engine = AdaptiveEngine(
-                candidate, starting_level_code=level,
-                skill_code=skill_code, session_type=session_type,
-                starting_sublevel_code=sublevel_code,
-                difficulty_tier_code=difficulty_tier,
+                candidate,
+                session_type=session_type,
             )
         except Exception as e:
             return _json_error(str(e))
@@ -312,10 +309,10 @@ class StartSessionView(View):
         return JsonResponse({
             'session_id': str(session.id),
             'candidate': candidate.name,
-            'starting_level': level,
+            'starting_level': engine.current_level.code,
             'starting_sublevel': engine.current_sublevel.code if engine.current_sublevel else None,
-            'skill': skill_code or 'all',
-            'difficulty_tier': difficulty_tier,
+            'skill': 'all',
+            'difficulty_tier': engine.difficulty_tier_code,
             'session_type': session_type,
             'progress': progress,
         })

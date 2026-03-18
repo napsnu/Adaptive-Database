@@ -72,12 +72,9 @@ def init_state():
         'skill_modal_data': None,
         'candidate_name': '',
         'candidate_email': '',
-        'selected_level': 'A1',
         'assessment_history': [],
         'tts_audio_b64': None,
         'candidate': None,
-        'selected_sublevel': None,
-        'selected_difficulty_tier': None,
         'question_retry_pending': False,
     }
     for k, v in defaults.items():
@@ -340,18 +337,12 @@ def page_dashboard():
                         cefr_level=lv, skill__code=sk_code, is_active=True
                     ).count()
                     st.metric(f"{sk_icon} {sk_code.title()}", q_cnt)
-            if not is_locked:
-                if st.button(
-                    f"Start {lv.code} Assessment",
-                    key=f"dash_start_{lv.code}",
-                    use_container_width=True,
-                    type="primary" if is_current else "secondary",
-                ):
-                    st.session_state.selected_level = lv.code
-                    st.session_state.selected_sublevel = None
-                    st.session_state.selected_difficulty_tier = None
-                    _start_assessment()
-                    st.rerun()
+            if is_current:
+                st.success("Current unlocked level. Use 'Start / Continue Assessment' above.")
+            elif is_passed:
+                st.caption("Completed")
+            else:
+                st.caption("Locked until previous level/sublevel is passed")
 
     # ── Recent sessions ───────────────────────────────────────────────
     if total_sessions > 0:
@@ -370,10 +361,58 @@ def page_dashboard():
 
 
 def page_setup():
-    """Candidate info + level / sublevel / difficulty tier selection."""
+    """Locked assessment setup: candidate info + progression overview."""
     st.markdown("## 🎯 Start Your Assessment")
 
     from assessment.models import DifficultyTier, CEFRSubLevel
+
+    candidate = st.session_state.candidate
+    current_tier_code = 'beginner'
+    current_level_code = 'A1'
+    current_sublevel_code = 'A1.1'
+
+    if candidate:
+        try:
+            candidate.refresh_from_db()
+        except Exception:
+            pass
+        if candidate.current_difficulty_tier:
+            current_tier_code = candidate.current_difficulty_tier.code
+        if candidate.current_cefr_level:
+            current_level_code = candidate.current_cefr_level.code
+        if candidate.current_sublevel:
+            current_sublevel_code = candidate.current_sublevel.code
+        else:
+            sl = CEFRSubLevel.objects.filter(cefr_level__code=current_level_code, is_active=True).order_by('unit_order').first()
+            if sl:
+                current_sublevel_code = sl.code
+
+    st.markdown("### Difficulty Tiers")
+    tiers = list(DifficultyTier.objects.all().order_by('order'))
+    if tiers:
+        tier_cols = st.columns(len(tiers))
+        current_order = next((t.order for t in tiers if t.code == current_tier_code), 1)
+        for col, tier in zip(tier_cols, tiers):
+            with col:
+                is_current = tier.code == current_tier_code
+                is_unlocked = tier.order <= current_order
+                icon = '📍' if is_current else '✅' if is_unlocked else '🔒'
+                bg = '#3B82F6' if is_current else '#22C55E' if is_unlocked else '#E5E7EB'
+                fg = 'white' if is_current or is_unlocked else '#9CA3AF'
+                st.markdown(
+                    f'<div style="background:{bg};color:{fg};border-radius:12px;padding:12px 8px;text-align:center;">'
+                    f'<div style="font-size:20px">{icon}</div>'
+                    f'<div style="font-weight:700">{tier.name}</div>'
+                    f'<div style="font-size:12px;opacity:0.9">{tier.code}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.info(
+        f"Current path: **{current_tier_code.title()}** → **{current_level_code}** → "
+        f"**{current_sublevel_code}** → **Reading**"
+    )
+    st.caption("Progression is automatic: A1.1 → A1.2 → A1.3 → ... → C2.3, then next tier unlocks.")
 
     with st.form("setup_form"):
         col1, col2 = st.columns(2)
@@ -383,48 +422,13 @@ def page_setup():
             email = st.text_input("Your Email", value=st.session_state.candidate_email or "")
 
         st.divider()
-        st.markdown("### 1️⃣  Select CEFR Level")
-        levels = list(CEFRLevel.objects.all().order_by('order'))
-        level_options = {f"{lv.code} — {lv.name}": lv.code for lv in levels}
-        default_level = st.session_state.selected_level or 'A1'
-        default_idx = next(
-            (i for i, v in enumerate(level_options.values()) if v == default_level), 0
-        )
-        selected_level_label = st.selectbox("CEFR Level", list(level_options.keys()), index=default_idx)
-        selected_level_code = level_options[selected_level_label]
-
-        st.markdown("### 2️⃣  Select Sub-Level (optional)")
-        sublevels = list(
-            CEFRSubLevel.objects.filter(
-                cefr_level__code=selected_level_code, is_active=True
-            ).order_by('unit_order')
-        )
-        sublevel_options = {"— All sub-levels (full level test) —": None}
-        for s in sublevels:
-            sublevel_options[f"{s.code} — {s.title}"] = s.code
-        selected_sublevel_label = st.selectbox("Sub-Level", list(sublevel_options.keys()))
-        selected_sublevel_code = sublevel_options[selected_sublevel_label]
-
-        st.markdown("### 3️⃣  Select Difficulty Tier")
-        tiers = list(DifficultyTier.objects.all().order_by('order'))
-        tier_options = {"— Auto progression (Beginner → Intermediate → Advanced) —": None}
-        for t in tiers:
-            desc = f" (Grade {t.grade_band})" if t.grade_band else ""
-            tier_options[f"{t.name}{desc}"] = t.code
-        selected_tier_label = st.selectbox("Difficulty Tier", list(tier_options.keys()))
-        selected_tier_code = tier_options[selected_tier_label]
-
-        st.divider()
         st.markdown("**Flow:** Reading → Writing → Listening → Speaking (5 questions each skill, 80% to pass)")
-        st.caption("Auto progression starts easier and increases tier difficulty within each skill.")
-
-        q_count = Question.objects.filter(cefr_level__code=selected_level_code, is_active=True).count()
-        if selected_sublevel_code:
-            q_count = Question.objects.filter(
-                cefr_level__code=selected_level_code,
-                sublevel__code=selected_sublevel_code,
-                is_active=True,
-            ).count()
+        q_count = Question.objects.filter(
+            difficulty_tier__code=current_tier_code,
+            cefr_level__code=current_level_code,
+            sublevel__code=current_sublevel_code,
+            is_active=True,
+        ).count()
         st.caption(f"Questions available for this selection: {q_count}")
 
         submitted = st.form_submit_button("Begin Assessment", type="primary", use_container_width=True)
@@ -437,9 +441,6 @@ def page_setup():
             else:
                 st.session_state.candidate_name = name.strip()
                 st.session_state.candidate_email = email.strip()
-                st.session_state.selected_level = selected_level_code
-                st.session_state.selected_sublevel = selected_sublevel_code
-                st.session_state.selected_difficulty_tier = selected_tier_code
                 _start_assessment()
                 st.rerun()
 
@@ -461,9 +462,6 @@ def _start_assessment():
 
     engine = AdaptiveEngine(
         candidate,
-        starting_level_code=st.session_state.selected_level,
-        starting_sublevel_code=st.session_state.selected_sublevel,
-        difficulty_tier_code=st.session_state.selected_difficulty_tier,
         session_type='practice',
     )
     session = engine.start_session()
@@ -1066,11 +1064,7 @@ def page_results():
     with col1:
         if passed and final.get('next_level'):
             next_dest = final['next_level']
-            next_cefr = next_dest.split('.')[0] if '.' in next_dest else next_dest
-            next_sub = next_dest if '.' in next_dest else None
             if st.button(f"🚀 Try {next_dest}", type="primary", use_container_width=True):
-                st.session_state.selected_level = next_cefr
-                st.session_state.selected_sublevel = next_sub
                 st.session_state.engine = None
                 st.session_state.current_question = None
                 st.session_state.question_number = 0

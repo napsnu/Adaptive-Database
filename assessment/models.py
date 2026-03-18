@@ -394,6 +394,10 @@ class Candidate(models.Model):
         CEFRSubLevel, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='candidates',
     )
+    current_difficulty_tier = models.ForeignKey(
+        DifficultyTier, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='candidates',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -403,7 +407,8 @@ class Candidate(models.Model):
 
     def __str__(self):
         level = self.current_cefr_level.code if self.current_cefr_level else "New"
-        return f"{self.name} ({level})"
+        tier = self.current_difficulty_tier.name if self.current_difficulty_tier else "No Tier"
+        return f"{self.name} ({tier} / {level})"
 
 
 # =====================================================================
