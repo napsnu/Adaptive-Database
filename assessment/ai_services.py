@@ -72,7 +72,7 @@ def grade_with_gemini(question_text, response_text, skill_code, question_type_co
     )
 
     # Prefer new SDK: google.genai
-    model_name = getattr(settings, 'GEMINI_MODEL', 'gemini-2.0-flash')
+    model_name = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
