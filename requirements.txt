@@ -4,5 +4,7 @@ django-cors-headers
 gunicorn
 whitenoise
 python-dotenv
+dj-database-url
 huggingface-hub
+google-genai
 google-generativeai

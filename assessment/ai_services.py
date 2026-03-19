@@ -66,20 +66,42 @@ def grade_with_gemini(question_text, response_text, skill_code, question_type_co
         logger.warning('GEMINI_API_KEY not set — falling back to basic grading')
         return None
 
+    prompt = _build_grading_prompt(
+        question_text, response_text, skill_code,
+        question_type_code, cefr_level, max_score, expected_text
+    )
+
+    # Prefer new SDK: google.genai
+    model_name = getattr(settings, 'GEMINI_MODEL', 'gemini-2.0-flash')
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
+        response_text_out = getattr(response, 'text', '') or ''
+        if response_text_out:
+            return _parse_gemini_response(response_text_out, max_score)
+    except Exception as e:
+        msg = str(e)
+        if '429' in msg or 'quota' in msg.lower() or 'rate limit' in msg.lower():
+            logger.warning(f'Gemini quota/rate limit reached; using fallback grading. Details: {e}')
+            return None
+        logger.error(f'Gemini grading failed via google.genai: {e}')
+
+    # Backward compatibility fallback: deprecated SDK
     try:
         import google.generativeai as genai
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-
-        prompt = _build_grading_prompt(
-            question_text, response_text, skill_code,
-            question_type_code, cefr_level, max_score, expected_text
-        )
-
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return _parse_gemini_response(response.text, max_score)
-
     except Exception as e:
+        msg = str(e)
+        if '429' in msg or 'quota' in msg.lower() or 'rate limit' in msg.lower():
+            logger.warning(f'Gemini quota/rate limit reached; using fallback grading. Details: {e}')
+            return None
         logger.error(f'Gemini grading failed: {e}')
         return None
 

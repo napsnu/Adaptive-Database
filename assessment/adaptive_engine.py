@@ -516,6 +516,20 @@ class AdaptiveEngine:
         if not answer:
             return False, 0.0, 'No answer provided', None
 
+        # Try Gemini first for subjective writing; fallback to sample-based grading if unavailable.
+        expected_for_ai = question.sample_answer or question.correct_answer or question.question_text
+        gemini_result = grade_with_gemini(
+            question_text=question.question_text,
+            response_text=answer,
+            skill_code='writing',
+            question_type_code=question.question_type.code,
+            cefr_level=question.cefr_level.code,
+            max_score=max_score,
+            expected_text=expected_for_ai,
+        )
+        if gemini_result is not None:
+            return gemini_result[0], gemini_result[1], gemini_result[2], None
+
         samples = list(question.answer_samples.all())
         # Backward compatible fallback to sample_answer if explicit samples are not seeded yet
         if not samples and question.sample_answer:
