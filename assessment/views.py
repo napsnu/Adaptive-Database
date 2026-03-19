@@ -23,6 +23,7 @@ from django.http import JsonResponse
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from django.db import DatabaseError
 
 from .models import (
     CEFRLevel, CEFRSubLevel, DifficultyTier, Skill, QuestionType, Topic,
@@ -77,34 +78,37 @@ def _resolve_response_format(question):
 
 class DashboardView(View):
     def get(self, request):
-        return JsonResponse({
-            'platform': 'Adaptive CEFR English Learning Platform',
-            'stats': {
-                'levels': CEFRLevel.objects.count(),
-                'skills': Skill.objects.count(),
-                'question_types': QuestionType.objects.count(),
-                'topics': Topic.objects.count(),
-                'questions': Question.objects.filter(is_active=True).count(),
-                'candidates': Candidate.objects.count(),
-                'sessions': AssessmentSession.objects.count(),
-            },
-            'endpoints': [
-                'GET /api/levels/', 'GET /api/skills/',
-                'GET /api/sublevels/?level=A1',
-                'GET /api/difficulty-tiers/',
-                'GET /api/question-types/', 'GET /api/topics/',
-                'GET /api/questions/?level=A1&sublevel=A1.1&skill=reading',
-                'GET /api/questions/<question_id>/',
-                'POST /api/session/start/',
-                'GET /api/session/<id>/next/',
-                'POST /api/session/<id>/answer/',
-                'GET /api/session/<id>/results/',
-                'GET /api/session/resume/?email=user@example.com',
-                'GET /api/admin/analytics/',
-                'GET /api/admin/analytics/?email=user@example.com',
-                'POST /api/tts/',
-            ],
-        })
+        try:
+            return JsonResponse({
+                'platform': 'Adaptive CEFR English Learning Platform',
+                'stats': {
+                    'levels': CEFRLevel.objects.count(),
+                    'skills': Skill.objects.count(),
+                    'question_types': QuestionType.objects.count(),
+                    'topics': Topic.objects.count(),
+                    'questions': Question.objects.filter(is_active=True).count(),
+                    'candidates': Candidate.objects.count(),
+                    'sessions': AssessmentSession.objects.count(),
+                },
+                'endpoints': [
+                    'GET /api/levels/', 'GET /api/skills/',
+                    'GET /api/sublevels/?level=A1',
+                    'GET /api/difficulty-tiers/',
+                    'GET /api/question-types/', 'GET /api/topics/',
+                    'GET /api/questions/?level=A1&sublevel=A1.1&skill=reading',
+                    'GET /api/questions/<question_id>/',
+                    'POST /api/session/start/',
+                    'GET /api/session/<id>/next/',
+                    'POST /api/session/<id>/answer/',
+                    'GET /api/session/<id>/results/',
+                    'GET /api/session/resume/?email=user@example.com',
+                    'GET /api/admin/analytics/',
+                    'GET /api/admin/analytics/?email=user@example.com',
+                    'POST /api/tts/',
+                ],
+            })
+        except DatabaseError:
+            return _json_error('Database not ready. Ensure migrations have been applied.', status=503)
 
 
 class LevelListView(View):
@@ -287,18 +291,20 @@ class StartSessionView(View):
         name = data.get('name', 'Learner')
         session_type = data.get('session_type', 'practice')
 
-        candidate, _ = Candidate.objects.get_or_create(
-            email=email, defaults={'name': name}
-        )
-        if name and candidate.name != name:
-            candidate.name = name
-            candidate.save(update_fields=['name'])
-
         try:
+            candidate, _ = Candidate.objects.get_or_create(
+                email=email, defaults={'name': name}
+            )
+            if name and candidate.name != name:
+                candidate.name = name
+                candidate.save(update_fields=['name'])
+
             engine = AdaptiveEngine(
                 candidate,
                 session_type=session_type,
             )
+        except DatabaseError:
+            return _json_error('Database not ready. Ensure migrations have been applied.', status=503)
         except Exception as e:
             return _json_error(str(e))
 
